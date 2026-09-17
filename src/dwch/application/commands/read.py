@@ -17,7 +17,7 @@ from ..deps import Deps
 from ..format import FILE_CLOSE, FILE_OPEN
 
 
-def cmd_read(args: Namespace, deps: Deps, _config) -> int:
+def cmd_read(args: Namespace, deps: Deps) -> int:
     """Read files and print them wrapped. Returns 0 or 2."""
     try:
         config = load_config(deps.fs, deps.project_root)

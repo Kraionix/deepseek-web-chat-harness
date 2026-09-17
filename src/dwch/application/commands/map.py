@@ -17,7 +17,7 @@ from ..deps import Deps
 from ..module_map import build_module_map, render_module_map
 
 
-def cmd_map(args: Namespace, deps: Deps, _config) -> int:
+def cmd_map(args: Namespace, deps: Deps) -> int:
     """Print the map. Returns 0 on success, 2 on error."""
     try:
         config = load_config(deps.fs, deps.project_root)

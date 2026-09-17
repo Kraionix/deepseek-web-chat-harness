@@ -8,8 +8,6 @@ without blocking the commit.
 
 from __future__ import annotations
 
-import io
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from ..domain.models import (
@@ -23,6 +21,7 @@ from ..domain.models import (
     State,
 )
 from ..shared.errors import HarnessError
+from . import lock as lock_mod
 from . import module_map
 from .deps import Deps
 from .ports import FilesystemPort
@@ -34,6 +33,10 @@ def check_compile(specs: list[FileSpec], deps: Deps) -> CheckResult:
     Reports syntax errors as `exit_code=1` with a per-file list in
     `stdout`. Files that do not end in `.py` are ignored; if none
     remain, the check passes with `(no python files)`.
+
+    The source is read through the filesystem port, and `compile()`
+    is called directly: it does not print to stdout or stderr, so
+    no redirection is needed.
     """
     py_files = [s.path for s in specs if s.path.endswith(".py")]
     if not py_files:
@@ -45,22 +48,26 @@ def check_compile(specs: list[FileSpec], deps: Deps) -> CheckResult:
             stderr="",
             required=True,
         )
-    buf = io.StringIO()
+    lines: list[str] = []
     failed = False
-    with redirect_stdout(buf), redirect_stderr(buf):
-        for rel in py_files:
-            target = deps.project_root / rel
-            try:
-                source = target.read_text(encoding="utf-8")
-                compile(source, str(target), "exec")
-            except (SyntaxError, ValueError) as exc:
-                failed = True
-                print(f"{rel}: {exc}")
+    for rel in py_files:
+        target = deps.project_root / rel
+        try:
+            source = deps.fs.read_text(target)
+        except HarnessError as exc:
+            failed = True
+            lines.append(f"{rel}: {exc}")
+            continue
+        try:
+            compile(source, str(target), "exec")
+        except (SyntaxError, ValueError) as exc:
+            failed = True
+            lines.append(f"{rel}: {exc}")
     return CheckResult(
         name="compile",
         command=("compile",),
         exit_code=1 if failed else 0,
-        stdout=buf.getvalue().rstrip(),
+        stdout="\n".join(lines),
         stderr="",
         required=True,
     )
@@ -188,8 +195,6 @@ def check_architecture_lock(
     """
     if lock is None:
         return None
-    from . import lock as lock_mod
-
     problems = lock_mod.check(fs, lock, project_root, roadmap_path, architecture_paths)
     ok = not problems
     return CheckResult(

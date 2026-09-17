@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..domain.models import Deviation, DeviationType
 from ..shared.errors import DeviationError
+from ..shared.toml import escape_basic_string
 from .ports import FilesystemPort
 
 
@@ -94,10 +95,10 @@ def render(deviations: list[Deviation]) -> str:
     for dev in deviations:
         lines.append("[[deviation]]")
         lines.append(f'type = "{dev.type.value}"')
-        affected = ", ".join(f'"{_escape(a)}"' for a in dev.affected)
+        affected = ", ".join(f'"{escape_basic_string(a)}"' for a in dev.affected)
         lines.append(f"affected = [{affected}]")
-        lines.append(f'reason = "{_escape(dev.reason)}"')
-        lines.append(f'detail = "{_escape(dev.detail)}"')
+        lines.append(f'reason = "{escape_basic_string(dev.reason)}"')
+        lines.append(f'detail = "{escape_basic_string(dev.detail)}"')
         lines.append(f"auto = {'true' if dev.auto else 'false'}")
         lines.append("")
     return "\n".join(lines)
@@ -135,11 +136,6 @@ def parse(text: str, path: Path) -> list[Deviation]:
             )
         )
     return out
-
-
-def _escape(value: str) -> str:
-    """Escape backslashes and double quotes for a TOML basic string."""
-    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 __all__ = [

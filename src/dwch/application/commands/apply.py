@@ -24,10 +24,11 @@ from ..format import (
     parse_step_message,
     validate_paths,
 )
+from ..rules import is_unset_phase
 from ..state import load_state
 
 
-def cmd_apply(args: Namespace, deps: Deps, _config) -> int:
+def cmd_apply(args: Namespace, deps: Deps) -> int:
     """Apply a step. Returns 0 on success, 1 on parse error, 2 on I/O."""
     try:
         config = load_config(deps.fs, deps.project_root)
@@ -36,7 +37,7 @@ def cmd_apply(args: Namespace, deps: Deps, _config) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if state.current_phase == "unset" or state.phase_kind == "unset":
+    if is_unset_phase(state):
         print(
             "error: no active phase; run "
             "`dwch new-phase NAME --kind {planning|development}` first",
@@ -77,10 +78,10 @@ def cmd_apply(args: Namespace, deps: Deps, _config) -> int:
         for spec in specs:
             target = deps.project_root / spec.path
             existed = deps.fs.exists(target)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            deps.fs.mkdir(target.parent, parents=True)
             deps.fs.write_text(target, spec.content)
             written.append((spec.path, existed))
-    except OSError as exc:
+    except HarnessError as exc:
         _rollback_written(deps, written)
         print(f"error writing files: {exc}", file=sys.stderr)
         print("partial writes were rolled back via git", file=sys.stderr)
@@ -102,12 +103,24 @@ def cmd_apply(args: Namespace, deps: Deps, _config) -> int:
 
 
 def _read_message(args: Namespace, deps: Deps) -> str | None:
+    """Return the step text, or None after printing an error.
+
+    `--from-file` resolves its argument relative to the project
+    root, not the process working directory. The step message is
+    project data; it belongs with the project, not with the shell.
+    """
     if args.from_file is not None:
         path = Path(args.from_file)
-        if not path.is_file():
+        if not path.is_absolute():
+            path = deps.project_root / path
+        if not deps.fs.is_file(path):
             print(f"error: file not found: {path}", file=sys.stderr)
             return None
-        return path.read_text(encoding="utf-8")
+        try:
+            return deps.fs.read_text(path)
+        except HarnessError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return None
     text = deps.clipboard.read()
     if not text.strip():
         print(
@@ -137,14 +150,25 @@ def _ensure_steps_gitignore(deps: Deps, steps_root: Path) -> None:
 
 
 def _rollback_written(deps: Deps, written: list[tuple[str, bool]]) -> None:
-    """Best-effort rollback of files written before a failure."""
-    paths = [p for p, _ in written]
-    if not paths:
-        return
-    # Rollback is best-effort. The report still says which files
-    # were written; the user can inspect git status themselves.
-    with contextlib.suppress(HarnessError):
-        deps.git.checkout_paths(deps.project_root, "HEAD", paths)
+    """Best-effort rollback of files written before a failure.
+
+    Files that existed before the apply are restored from `HEAD`;
+    files that did not are removed. Empty directories created by
+    `mkdir(parents=True)` are left behind — removing them safely
+    would require knowing which were created by this call, and the
+    cost of leaving an empty directory is nil.
+    """
+    tracked = [p for p, existed in written if existed]
+    new_files = [p for p, existed in written if not existed]
+
+    if tracked:
+        with contextlib.suppress(HarnessError):
+            deps.git.checkout_paths(deps.project_root, "HEAD", tracked)
+
+    for rel in new_files:
+        target = deps.project_root / rel
+        with contextlib.suppress(HarnessError):
+            deps.fs.unlink(target)
 
 
 __all__ = ["cmd_apply"]

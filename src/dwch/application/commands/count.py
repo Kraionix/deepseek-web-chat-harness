@@ -15,7 +15,7 @@ from ...shared.errors import FilesystemError
 from ..deps import Deps
 
 
-def cmd_count(args: Namespace, deps: Deps, _config) -> int:
+def cmd_count(args: Namespace, deps: Deps) -> int:
     """Count tokens. Returns 0 on success, 2 on error."""
     target = Path(args.path)
     if not target.is_absolute():

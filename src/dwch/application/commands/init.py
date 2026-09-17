@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import urllib.request
 from argparse import Namespace
+from importlib.resources import files
 from pathlib import Path
 
 from ...shared.errors import (
@@ -33,7 +34,7 @@ _TEMPLATES = (
 )
 
 
-def cmd_init(args: Namespace, deps: Deps, _config) -> int:
+def cmd_init(args: Namespace, deps: Deps) -> int:
     """Install the harness. Returns 0 on success, 2 on error."""
     root = deps.project_root
     harness_dir = root / ".harness"
@@ -100,8 +101,6 @@ def _write_steps_gitignore(deps: Deps, steps_dir: Path) -> None:
 
 def _write_templates(deps: Deps, harness_dir: Path) -> None:
     """Copy the shipped templates into `.harness/`."""
-    from importlib.resources import files
-
     for name in _TEMPLATES:
         target = harness_dir / name
         if deps.fs.exists(target):

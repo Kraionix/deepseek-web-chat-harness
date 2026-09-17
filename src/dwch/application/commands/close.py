@@ -24,10 +24,11 @@ from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..handoff import update_metadata
+from ..rules import is_planning_phase
 from ..state import load_state, save_state, set_roadmap_frozen, with_updates
 
 
-def cmd_close(args: Namespace, deps: Deps, _config) -> int:
+def cmd_close(args: Namespace, deps: Deps) -> int:
     """Close the session. Returns 0 on success, 2 on error."""
     try:
         config = load_config(deps.fs, deps.project_root)
@@ -44,7 +45,7 @@ def cmd_close(args: Namespace, deps: Deps, _config) -> int:
         )
         return 2
 
-    head = _try_head(deps)
+    head = deps.git.try_head(deps.project_root)
     now = datetime.now(UTC).isoformat(timespec="seconds")
 
     if args.freeze:
@@ -88,7 +89,7 @@ def cmd_close(args: Namespace, deps: Deps, _config) -> int:
 
 def _freeze(deps: Deps, config, state, head: str, now: str) -> int:
     """Write the roadmap lock and mark state frozen. Returns 0 on success."""
-    if state.phase_kind != "planning":
+    if not is_planning_phase(state):
         print(
             "error: --freeze is only valid in a planning phase",
             file=sys.stderr,
@@ -155,13 +156,6 @@ def _freeze(deps: Deps, config, state, head: str, now: str) -> int:
     set_roadmap_frozen(deps.fs, deps.project_root, state, version=roadmap.meta.version)
     print(f"frozen roadmap v{roadmap.meta.version} at {lock_path}")
     return 0
-
-
-def _try_head(deps: Deps) -> str:
-    try:
-        return deps.git.rev_parse(deps.project_root, "HEAD")
-    except HarnessError:
-        return ""
 
 
 __all__ = ["cmd_close"]

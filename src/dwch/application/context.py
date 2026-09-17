@@ -17,6 +17,7 @@ deviations summary. When the roadmap is exhausted, the
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 
 from ..domain.models import BootstrapResult, Config, Roadmap, State
@@ -24,6 +25,7 @@ from . import deviations as dev_mod
 from . import roadmap as roadmap_mod
 from .deps import Deps
 from .module_map import build_module_map, render_module_map
+from .rules import is_development_phase
 from .token_counter import count_sections
 
 # Optional sections are dropped in this order when the total
@@ -87,7 +89,7 @@ def _collect_sections(
     roadmap, module-map, recent-reports, and commits sections would
     only add noise.
     """
-    is_development = state.phase_kind == "development"
+    is_development = is_development_phase(state)
     roadmap_complete = (
         is_development
         and roadmap is not None
@@ -144,7 +146,7 @@ def _truncate(
 
 
 def _header(deps: Deps, config: Config, state: State) -> str:
-    head = _git_head(deps)
+    head = deps.git.try_head(deps.project_root) or "(no commits)"
     now = datetime.now(UTC).isoformat(timespec="seconds")
     return (
         f"# Bootstrap — {config.project_name}\n"
@@ -156,14 +158,6 @@ def _header(deps: Deps, config: Config, state: State) -> str:
         f"- Git HEAD: `{head}`\n"
         f"- Generated: {now}\n"
     )
-
-
-def _git_head(deps: Deps) -> str:
-    try:
-        return deps.git.rev_parse(deps.project_root, "HEAD")
-    except Exception:
-        # An empty git history is legal for a fresh project.
-        return "(no commits)"
 
 
 def _task(deps: Deps) -> str:
@@ -293,8 +287,6 @@ def _recent_commits(deps: Deps) -> str:
 
 def _read_template(deps: Deps, name: str) -> str:
     """Read one of the shipped templates from the package."""
-    from importlib.resources import files
-
     template = files("dwch.templates") / name
     return template.read_text(encoding="utf-8").rstrip()
 

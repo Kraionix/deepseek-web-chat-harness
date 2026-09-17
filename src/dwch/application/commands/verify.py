@@ -40,6 +40,7 @@ from ..format import (
     render_report,
     summarize_check,
 )
+from ..rules import is_development_phase, is_planning_phase, is_unset_phase
 from ..state import load_state, save_state, with_updates
 from ..verify_checks import (
     check_architecture_lock,
@@ -52,7 +53,7 @@ from ..verify_checks import (
 )
 
 
-def cmd_verify(args: Namespace, deps: Deps, _config) -> int:
+def cmd_verify(args: Namespace, deps: Deps) -> int:
     """Verify a step. Returns 0 on success, 1 on check failure, 2 on error."""
     try:
         config = load_config(deps.fs, deps.project_root)
@@ -61,7 +62,7 @@ def cmd_verify(args: Namespace, deps: Deps, _config) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if state.current_phase == "unset" or state.phase_kind == "unset":
+    if is_unset_phase(state):
         print(
             "error: no active phase; run "
             "`dwch new-phase NAME --kind {planning|development}` first",
@@ -90,7 +91,7 @@ def cmd_verify(args: Namespace, deps: Deps, _config) -> int:
         )
         return 2
 
-    missing = [s.path for s in specs if not (deps.project_root / s.path).is_file()]
+    missing = [s.path for s in specs if not deps.fs.is_file(deps.project_root / s.path)]
     if missing:
         print(
             "error: step references files that do not exist on disk: "
@@ -116,8 +117,8 @@ def cmd_verify(args: Namespace, deps: Deps, _config) -> int:
         except HarnessError:
             roadmap = None
 
-    is_planning = state.phase_kind == "planning"
-    is_development = state.phase_kind == "development"
+    is_planning = is_planning_phase(state)
+    is_development = is_development_phase(state)
     dev_dir = deps.project_root / config.roadmap.get(
         "deviations_path", ".harness/deviations"
     )

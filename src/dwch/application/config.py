@@ -50,7 +50,10 @@ _DEFAULT_TOKENIZER_URL = (
 
 _DEFAULT_READ_MAX_TOKENS = 6000
 
-_HARNESS_VERSION = "0.2.0"
+# Version of the config file format. Independent of the package
+# version: a patch release that does not change the format keeps
+# this value, and existing `.harness/config.toml` files keep working.
+_CONFIG_FORMAT_VERSION = "0.2.0"
 
 
 def load_config(fs: FilesystemPort, project_root: Path) -> Config:
@@ -74,10 +77,10 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
 
     harness = data.get("harness", {})
     version = str(harness.get("version", ""))
-    if version != _HARNESS_VERSION:
+    if version != _CONFIG_FORMAT_VERSION:
         raise ConfigError(
             f"config version {version!r} does not match harness "
-            f"version {_HARNESS_VERSION!r}. Run `dwch init --force` "
+            f"version {_CONFIG_FORMAT_VERSION!r}. Run `dwch init --force` "
             "or update the config by hand."
         )
 
@@ -91,7 +94,7 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
     verify_commands = tuple(data.get("verify", {}).get("commands", []))
     planning_commands = tuple(data.get("verify", {}).get("planning_commands", []))
 
-    _validate_relative_paths(context.get("architecture", []), "context.architecture")
+    _validate_paths(config=paths, context=context, roadmap=roadmap)
 
     tokenizer = data.get("tokenizer", {})
     tokenizer_url = str(tokenizer.get("url", _DEFAULT_TOKENIZER_URL))
@@ -130,7 +133,7 @@ def config_to_toml(project_name: str) -> str:
 # Edit by hand as needed; `dwch` only reads this file.
 
 [harness]
-version = "{_HARNESS_VERSION}"
+version = "{_CONFIG_FORMAT_VERSION}"
 
 [project]
 name = "{project_name}"
@@ -159,7 +162,6 @@ lock_required = false
 # Commands run by `dwch verify` in order. `required = false` means a
 # non-zero exit is recorded but does not block the commit.
 commands = [
-    {{ name = "syntax", command = ["python", "-m", "compileall", "-q", "src"] }},
     {{ name = "lint", command = ["ruff", "check", "."] }},
 ]
 # Extra commands run only during a planning phase.
@@ -181,20 +183,45 @@ max_tokens = {_DEFAULT_READ_MAX_TOKENS}
 """
 
 
-def _validate_relative_paths(paths: list, label: str) -> None:
-    """Reject absolute paths and parent traversal in a config list.
+def _validate_paths(*, config: dict, context: dict, roadmap: dict) -> None:
+    """Reject absolute paths and parent traversal in every path field.
 
-    Pre:  `paths` is a list of strings; `label` names the config key
-          for the error message.
+    Pre:  `config`, `context`, `roadmap` are the merged dicts from
+          `load_config`.
     Post: returns None on success.
-    Raises: `ConfigError` if any entry is not a relative path.
+    Raises: `ConfigError` if any path-typed value is not relative.
     """
-    for entry in paths:
-        p = Path(str(entry))
-        if p.is_absolute():
-            raise ConfigError(f"{label}: absolute path not allowed: {entry!r}")
-        if ".." in p.parts:
-            raise ConfigError(f"{label}: parent traversal not allowed: {entry!r}")
+    for key, value in config.items():
+        _validate_relative_path(value, f"paths.{key}")
+
+    for key in ("essential", "references", "architecture"):
+        for entry in context.get(key, []):
+            _validate_relative_path(str(entry), f"context.{key}")
+
+    # `map_root` may be empty: an empty value means "no map". Only
+    # a non-empty value is validated.
+    map_root = context.get("map_root", "")
+    if map_root:
+        _validate_relative_path(str(map_root), "context.map_root")
+
+    for key in ("path", "lock_path", "deviations_path"):
+        value = roadmap.get(key, "")
+        if value:
+            _validate_relative_path(str(value), f"roadmap.{key}")
+
+
+def _validate_relative_path(value: str, label: str) -> None:
+    """Reject an absolute path or a path containing `..`.
+
+    Pre:  `value` is a string; `label` names the config key.
+    Post: returns None on success.
+    Raises: `ConfigError` if the path is not a safe relative path.
+    """
+    p = Path(value)
+    if p.is_absolute():
+        raise ConfigError(f"{label}: absolute path not allowed: {value!r}")
+    if ".." in p.parts:
+        raise ConfigError(f"{label}: parent traversal not allowed: {value!r}")
 
 
 __all__ = ["config_to_toml", "load_config"]

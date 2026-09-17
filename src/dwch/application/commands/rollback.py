@@ -22,7 +22,7 @@ from ..deps import Deps
 from ..state import load_state, save_state, with_updates
 
 
-def cmd_rollback(args: Namespace, deps: Deps, _config) -> int:
+def cmd_rollback(args: Namespace, deps: Deps) -> int:
     """Rollback the last step. Returns 0 or 2."""
     if not args.yes:
         print("error: rollback discards work; pass --yes to confirm", file=sys.stderr)

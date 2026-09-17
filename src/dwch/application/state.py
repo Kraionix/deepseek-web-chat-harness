@@ -17,7 +17,10 @@ from ..domain.models import State
 from ..shared.errors import StateError
 from .ports import FilesystemPort
 
-_HARNESS_VERSION = "0.2.0"
+# Version of the state file format. Independent of the package
+# version: a patch release that does not change the format keeps
+# this value, and existing `.harness/state.toml` files keep working.
+_STATE_FORMAT_VERSION = "0.2.0"
 
 
 def load_state(fs: FilesystemPort, project_root: Path) -> State:
@@ -44,7 +47,9 @@ def load_state(fs: FilesystemPort, project_root: Path) -> State:
     session = data.get("session", {})
 
     return State(
-        harness_version=str(data.get("harness", {}).get("version", _HARNESS_VERSION)),
+        harness_version=str(
+            data.get("harness", {}).get("version", _STATE_FORMAT_VERSION)
+        ),
         current_phase=str(phase.get("current", "unset")),
         phase_kind=str(phase.get("kind", "unset")),
         current_step=int(step.get("current", 0)),
@@ -83,7 +88,7 @@ def initial_state() -> State:
     """Return a fresh `State` for a newly-initialized project."""
     now = datetime.now(UTC).isoformat(timespec="seconds")
     return State(
-        harness_version=_HARNESS_VERSION,
+        harness_version=_STATE_FORMAT_VERSION,
         current_phase="unset",
         phase_kind="unset",
         current_step=0,

@@ -23,7 +23,7 @@ from ..deps import Deps
 from ..state import load_state
 
 
-def cmd_bootstrap(args: Namespace, deps: Deps, _config) -> int:
+def cmd_bootstrap(args: Namespace, deps: Deps) -> int:
     """Build and print the bootstrap. Returns 0 on success, 2 on error."""
     try:
         config = load_config(deps.fs, deps.project_root)
@@ -63,12 +63,24 @@ def cmd_bootstrap(args: Namespace, deps: Deps, _config) -> int:
 
 
 def _load_roadmap(deps: Deps, config):
+    """Load the roadmap if one exists; warn and continue otherwise.
+
+    A roadmap that exists but cannot be parsed is a real problem for
+    the session: the AI would see no roadmap and assume there is
+    none. The bootstrap still has to be emitted, because the phase
+    may be planning (roadmap is written during it) — so the failure
+    goes to stderr and the section is dropped.
+    """
     path = deps.project_root / config.roadmap.get("path", ".harness/roadmap.toml")
     if not deps.fs.exists(path):
         return None
     try:
         return roadmap_mod.load(deps.fs, path)
-    except HarnessError:
+    except HarnessError as exc:
+        print(
+            f"warning: could not load roadmap: {exc}",
+            file=sys.stderr,
+        )
         return None
 
 

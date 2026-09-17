@@ -1,9 +1,9 @@
 """Command registry.
 
-Each command is a function `cmd_*(args, *, deps, config) -> int`.
-`args` is the parsed argparse namespace for that subcommand. `deps`
-carries the ports, `config` the project configuration. The return
-value is the process exit code.
+Each command is a function `cmd_*(args, deps) -> int`. `args` is
+the parsed argparse namespace for that subcommand. `deps` carries
+the ports and the project root. The return value is the process
+exit code.
 
 The CLI dispatches through `COMMANDS`, keyed by the argparse
 subcommand name.
@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from ...domain.models import Config
 from ..deps import Deps
 from .apply import cmd_apply
 from .bootstrap import cmd_bootstrap
@@ -28,7 +27,7 @@ from .read import cmd_read
 from .rollback import cmd_rollback
 from .verify import cmd_verify
 
-CommandFn = Callable[[Any, Deps, Config], int]
+CommandFn = Callable[[Any, Deps], int]
 
 
 COMMANDS: dict[str, CommandFn] = {

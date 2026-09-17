@@ -66,8 +66,8 @@ def validate(roadmap: Roadmap) -> list[str]:
     """Return a list of structural problems with `roadmap`.
 
     An empty list means the roadmap is well-formed. The function is
-    deliberately structural: it checks numbering, references, and
-    graph shape, not semantics.
+    deliberately structural: it checks numbering, references, graph
+    shape, and path safety, not semantics.
     """
     problems: list[str] = []
 
@@ -92,6 +92,19 @@ def validate(roadmap: Roadmap) -> list[str]:
                 )
             elif dep not in numbers:
                 problems.append(f"step {step.number}: depends_on {dep} does not exist")
+        for rel in step.files:
+            reason = _bad_path(rel)
+            if reason is not None:
+                problems.append(f"step {step.number}: file {rel!r}: {reason}")
+
+    for iface in roadmap.interfaces:
+        if not iface.module:
+            continue
+        reason = _bad_path(iface.module)
+        if reason is not None:
+            problems.append(
+                f"interface {iface.name!r}: module {iface.module!r}: {reason}"
+            )
 
     if _has_cycle(roadmap.steps):
         problems.append("depends_on graph contains a cycle")
@@ -168,6 +181,21 @@ def render_interfaces(roadmap: Roadmap) -> str:
             line += f" — {iface.doc}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def _bad_path(value: str) -> str | None:
+    """Return a reason string if `value` is not a safe relative path.
+
+    Pre:  `value` is a string from the roadmap.
+    Post: None if the path is relative and contains no `..`; a short
+          reason otherwise.
+    """
+    p = Path(value)
+    if p.is_absolute():
+        return "absolute path not allowed"
+    if ".." in p.parts:
+        return "parent traversal not allowed"
+    return None
 
 
 def _parse_interface(item: dict, path: Path) -> RoadmapInterface:

@@ -15,6 +15,14 @@ from .models import (
     State,
 )
 
+_VALID_PHASE_KINDS = frozenset(
+    {
+        PhaseKind.PLANNING.value,
+        PhaseKind.DEVELOPMENT.value,
+        PhaseKind.UNSET.value,
+    }
+)
+
 
 def is_step_number_valid(n: int) -> bool:
     """True when `n` is a positive integer suitable for a step number.
@@ -41,6 +49,16 @@ def is_development_phase(state: State) -> bool:
     not frozen, the phase runs but no roadmap checks fire.
     """
     return state.phase_kind == PhaseKind.DEVELOPMENT.value
+
+
+def is_unset_phase(state: State) -> bool:
+    """True when no phase has been started yet.
+
+    Both `current_phase` and `phase_kind` start as `"unset"` after
+    `init`. Commands that require an active phase (`apply`,
+    `verify`) check this predicate and refuse to run.
+    """
+    return state.phase_kind == PhaseKind.UNSET.value
 
 
 def is_roadmap_frozen(state: State) -> bool:
@@ -91,12 +109,13 @@ def is_state_consistent(state: State) -> bool:
     """True when the state fields are internally coherent.
 
     Checks that the phase name is non-empty, the step counters are
-    non-negative, and the roadmap version is non-negative. A fuller
-    check (state vs. git HEAD) happens in `health` because it needs
-    the git port.
+    non-negative, the roadmap version is non-negative, and the
+    phase kind is one of the known values. A fuller check (state vs.
+    git HEAD) happens in `health` because it needs the git port.
     """
     return (
         bool(state.current_phase)
+        and state.phase_kind in _VALID_PHASE_KINDS
         and state.current_step >= 0
         and state.roadmap_step >= 0
         and state.roadmap_version >= 0
@@ -113,5 +132,6 @@ __all__ = [
     "is_state_consistent",
     "is_step_number_valid",
     "is_substantive",
+    "is_unset_phase",
     "roadmap_step_valid",
 ]

@@ -59,6 +59,11 @@ files in the current step and write a `bugfix-prior` deviation.
   commits with `git add -A`, so any scratch file left in the tree
   is included in the step's commit. Put scratch files in `steps/`
   (self-ignored) or outside the repository.
+- Maintain a root `.gitignore`. The harness does not create one,
+  and without it the first `verify` commit sweeps build outputs
+  and caches (`__pycache__/`, `.pytest_cache/`, `.ruff_cache/`,
+  `*.egg-info/`) into the step's history. Ignore rules are the
+  project's business, not the harness's.
 - Do not edit `.harness/state.toml` or `.harness/roadmap.toml` by
   hand while a session is open.
 

@@ -56,6 +56,18 @@ class CliGit:
     def rev_parse(self, cwd: Path, ref: str) -> str:
         return self._run(cwd, "rev-parse", "--short", ref).strip()
 
+    def try_head(self, cwd: Path) -> str:
+        """Best-effort `rev-parse --short HEAD`; empty string on failure.
+
+        An empty repository has no HEAD. Callers that only want the
+        hash for display tolerate that; callers that need a commit
+        raise `GitError` themselves.
+        """
+        try:
+            return self.rev_parse(cwd, "HEAD")
+        except GitError:
+            return ""
+
     def commit_all(self, cwd: Path, message: str) -> str:
         self._run(cwd, "add", "-A")
         self._run(cwd, "commit", "-m", message)

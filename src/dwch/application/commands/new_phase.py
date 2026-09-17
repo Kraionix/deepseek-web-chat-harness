@@ -40,7 +40,7 @@ from ..state import load_state, save_state, with_updates
 _INVALID_NAME_CHARS = frozenset('<>:"|?*')
 
 
-def cmd_new_phase(args: Namespace, deps: Deps, _config) -> int:
+def cmd_new_phase(args: Namespace, deps: Deps) -> int:
     """Start a new phase. Returns 0 on success, 2 on error."""
     try:
         config = load_config(deps.fs, deps.project_root)
@@ -71,9 +71,15 @@ def cmd_new_phase(args: Namespace, deps: Deps, _config) -> int:
             file=sys.stderr,
         )
 
-    # Raises on a missing or exhausted roadmap; the CLI turns that
-    # into an error message and exit code 2.
-    start_step = _resolve_start_step(deps, config, state, kind)
+    # `_resolve_start_step` raises on a missing or exhausted
+    # roadmap. The command owns the conversion from exception to
+    # exit code: the CLI's generic handler is a fallback, not the
+    # primary contract.
+    try:
+        start_step = _resolve_start_step(deps, config, state, kind)
+    except HarnessError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     if kind == "development" and start_step == 0 and not state.roadmap_frozen:
         print(
@@ -83,7 +89,7 @@ def cmd_new_phase(args: Namespace, deps: Deps, _config) -> int:
         )
 
     now = datetime.now(UTC).isoformat(timespec="seconds")
-    head = _try_head(deps)
+    head = deps.git.try_head(deps.project_root)
 
     _reset_handoff(deps, name, kind)
 
@@ -184,13 +190,6 @@ def _reset_handoff(deps: Deps, name: str, kind: str) -> None:
     template = files("dwch.templates") / template_name
     body = template.read_text(encoding="utf-8").replace("{{phase}}", name)
     deps.fs.write_text(deps.project_root / ".harness" / "handoff.md", body)
-
-
-def _try_head(deps: Deps) -> str:
-    try:
-        return deps.git.rev_parse(deps.project_root, "HEAD")
-    except HarnessError:
-        return ""
 
 
 __all__ = ["cmd_new_phase"]

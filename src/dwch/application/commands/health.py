@@ -15,10 +15,11 @@ from .. import lock as lock_mod
 from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
+from ..rules import is_state_consistent
 from ..state import load_state
 
 
-def cmd_health(_args: Namespace, deps: Deps, _config) -> int:
+def cmd_health(_args: Namespace, deps: Deps) -> int:
     """Run health checks. Returns 0 or 1."""
     checks: list[tuple[str, bool, str, bool]] = []
 
@@ -104,10 +105,20 @@ def _check_layout(deps: Deps) -> tuple[str, bool, str, bool]:
 
 
 def _check_state(deps: Deps) -> tuple[str, bool, str, bool]:
+    """Check that state loads and passes the coherence predicate.
+
+    `load_state` catches structural errors (bad TOML, missing file).
+    `is_state_consistent` catches semantic ones (negative counters,
+    unknown phase kind). A state that fails the latter is not fatal
+    for `load_state`, but `health` reports it as a failure so the
+    user sees the problem before it confuses a later command.
+    """
     try:
         state = load_state(deps.fs, deps.project_root)
     except HarnessError as exc:
         return ("state", False, str(exc), True)
+    if not is_state_consistent(state):
+        return ("state", False, "state is internally inconsistent", True)
     detail = (
         f"phase={state.current_phase} kind={state.phase_kind} step={state.current_step}"
     )

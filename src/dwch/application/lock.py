@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..domain.models import Lock, LockEntry
 from ..shared.errors import LockError
+from ..shared.toml import escape_basic_string
 from .ports import FilesystemPort
 from .roadmap import sha256
 
@@ -133,20 +134,26 @@ def check(
 
 
 def render(lock: Lock) -> str:
-    """Render a `Lock` as a TOML document."""
+    """Render a `Lock` as a TOML document.
+
+    All string values pass through `escape_basic_string`. The fields
+    the harness writes (timestamps, hashes, phase names, relative
+    paths) never need it, but a lock loaded and re-rendered from
+    disk could, and the cost of uniform escaping is nil.
+    """
     lines = [
         "[lock]",
-        f'at = "{lock.at}"',
-        f'phase = "{lock.phase}"',
-        f'commit = "{lock.commit}"',
+        f'at = "{escape_basic_string(lock.at)}"',
+        f'phase = "{escape_basic_string(lock.phase)}"',
+        f'commit = "{escape_basic_string(lock.commit)}"',
         f"version = {lock.version}",
-        f'roadmap_sha256 = "{lock.roadmap_sha256}"',
+        f'roadmap_sha256 = "{escape_basic_string(lock.roadmap_sha256)}"',
         "",
     ]
     for entry in lock.architecture:
         lines.append("[[architecture]]")
-        lines.append(f'path = "{entry.path}"')
-        lines.append(f'sha256 = "{entry.sha256}"')
+        lines.append(f'path = "{escape_basic_string(entry.path)}"')
+        lines.append(f'sha256 = "{escape_basic_string(entry.sha256)}"')
         lines.append("")
     return "\n".join(lines)
 

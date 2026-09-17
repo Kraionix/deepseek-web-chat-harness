@@ -147,14 +147,21 @@ def _public_symbols(tree: ast.Module, *, include_private: bool) -> list[SymbolIn
                 if isinstance(target, ast.Name) and _is_public(
                     target.id, include_private
                 ):
-                    out.append(
-                        SymbolInfo(
-                            name=target.id,
-                            kind="constant",
-                            signature=f"{target.id} = ...",
-                        )
-                    )
+                    out.append(_constant_symbol(target.id))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if _is_public(node.target.id, include_private):
+                out.append(_constant_symbol(node.target.id))
     return out
+
+
+def _constant_symbol(name: str) -> SymbolInfo:
+    """SymbolInfo for a module-level constant.
+
+    Annotated and unannotated assignments produce the same shape:
+    the harness does not surface the type in the map. The constant
+    is reported by name only.
+    """
+    return SymbolInfo(name=name, kind="constant", signature=f"{name} = ...")
 
 
 def _is_public(name: str, include_private: bool) -> bool:

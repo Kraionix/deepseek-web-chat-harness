@@ -1,8 +1,8 @@
 """Command-line entry point.
 
-Parses argv, constructs the adapters, loads the config, dispatches
-to the chosen command, and returns its exit code. This is the only
-module that knows about concrete adapter classes.
+Parses argv, constructs the adapters, dispatches to the chosen
+command, and returns its exit code. This is the only module that
+knows about concrete adapter classes.
 """
 
 from __future__ import annotations
@@ -47,7 +47,6 @@ def main(argv: list[str] | None = None) -> int:
         counter = DeepseekTokenizer(
             project_root / ".harness" / "data" / "deepseek_tokenizer.json"
         )
-        config = None
 
     deps = Deps(
         fs=fs,
@@ -64,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        return command(args, deps, config)
+        return command(args, deps)
     except HarnessError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -101,7 +100,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_apply.add_argument(
         "--from-file",
         default=None,
-        help="Read the step message from a file instead of the clipboard.",
+        help=(
+            "Read the step message from a file instead of the clipboard. "
+            "Relative paths are resolved against the project root."
+        ),
     )
 
     p_verify = sub.add_parser("verify", help="Run checks and produce a report.")
