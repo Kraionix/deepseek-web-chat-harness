@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deepseek-web-chat-harness"
-version = "0.2.2"
+version = "0.2.3"
 description = "A minimal agent harness for AI-driven development in web chat."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,6 +28,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ruff>=0.6",
+    "pytest>=8.0",
+    "pytest-cov",
 ]
 
 [project.scripts]
@@ -47,3 +49,8 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+pythonpath = ["."]

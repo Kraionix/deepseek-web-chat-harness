@@ -29,7 +29,14 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from ...domain.models import CheckResult, Deviation, FileSpec, Report, Roadmap
-from ...domain.rules import has_blocker, is_substantive
+from ...domain.rules import (
+    has_blocker,
+    is_development_phase,
+    is_planning_phase,
+    is_roadmap_frozen,
+    is_substantive,
+    is_unset_phase,
+)
 from ...shared.errors import FormatError, HarnessError
 from .. import deviations as dev_mod
 from .. import lock as lock_mod
@@ -40,12 +47,6 @@ from ..format import (
     parse_step_message,
     render_report,
     summarize_check,
-)
-from ..rules import (
-    is_development_phase,
-    is_planning_phase,
-    is_roadmap_frozen,
-    is_unset_phase,
 )
 from ..state import load_state, save_state, with_updates
 from ..verify_checks import (

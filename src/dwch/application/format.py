@@ -64,6 +64,11 @@ def validate_paths(specs: list[FileSpec], project_root: Path) -> None:
     #1–4 on disk.
     """
     for spec in specs:
+        # Why: on Windows, `Path("/foo")` has a root but no drive, so
+        # `is_absolute()` returns False. A leading separator still
+        # means "outside the project", so it is rejected explicitly.
+        if spec.path.startswith(("/", "\\")):
+            raise FormatError(f"absolute path not allowed: {spec.path!r}")
         p = Path(spec.path)
         if p.is_absolute():
             raise FormatError(f"absolute path not allowed: {spec.path!r}")

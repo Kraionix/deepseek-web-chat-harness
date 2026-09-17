@@ -269,6 +269,11 @@ def _validate_relative_path(value: object, label: str) -> None:
     """
     if not isinstance(value, str):
         raise ConfigError(f"{label}: expected a string, got {type(value).__name__}")
+    # Why: on Windows, `Path("/foo")` has a root but no drive, so
+    # `is_absolute()` returns False. A leading separator still means
+    # "outside the project", so it is rejected explicitly.
+    if value.startswith(("/", "\\")):
+        raise ConfigError(f"{label}: absolute path not allowed: {value!r}")
     p = Path(value)
     if p.is_absolute():
         raise ConfigError(f"{label}: absolute path not allowed: {value!r}")

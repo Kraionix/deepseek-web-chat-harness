@@ -16,6 +16,7 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
+from ...domain.rules import is_unset_phase
 from ...shared.errors import FormatError, HarnessError
 from ..config import load_config
 from ..deps import Deps
@@ -24,7 +25,6 @@ from ..format import (
     parse_step_message,
     validate_paths,
 )
-from ..rules import is_unset_phase
 from ..state import load_state
 
 

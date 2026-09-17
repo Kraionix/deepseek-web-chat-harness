@@ -194,6 +194,11 @@ def _bad_path(value: str) -> str | None:
     Post: None if the path is relative and contains no `..`; a short
           reason otherwise.
     """
+    # Why: on Windows, `Path("/foo")` has a root but no drive, so
+    # `is_absolute()` returns False. A leading separator still means
+    # "outside the project", so it is rejected explicitly.
+    if value.startswith(("/", "\\")):
+        return "absolute path not allowed"
     p = Path(value)
     if p.is_absolute():
         return "absolute path not allowed"

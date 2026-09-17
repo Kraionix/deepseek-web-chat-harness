@@ -21,11 +21,11 @@ from importlib.resources import files
 from pathlib import Path
 
 from ..domain.models import BootstrapResult, Config, Roadmap, State
+from ..domain.rules import is_development_phase
 from . import deviations as dev_mod
 from . import roadmap as roadmap_mod
 from .deps import Deps
 from .module_map import build_module_map, render_module_map
-from .rules import is_development_phase
 from .token_counter import count_sections
 
 # Optional sections are dropped in this order when the total

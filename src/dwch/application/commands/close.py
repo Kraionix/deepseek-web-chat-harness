@@ -18,13 +18,13 @@ import sys
 from argparse import Namespace
 from datetime import UTC, datetime
 
+from ...domain.rules import is_planning_phase
 from ...shared.errors import HarnessError
 from .. import lock as lock_mod
 from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..handoff import update_metadata
-from ..rules import is_planning_phase
 from ..state import load_state, save_state, set_roadmap_frozen, with_updates
 
 

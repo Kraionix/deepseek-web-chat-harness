@@ -10,12 +10,12 @@ from __future__ import annotations
 import sys
 from argparse import Namespace
 
+from ...domain.rules import is_state_consistent
 from ...shared.errors import HarnessError
 from .. import lock as lock_mod
 from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
-from ..rules import is_state_consistent
 from ..state import load_state
 
 

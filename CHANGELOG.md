@@ -3,6 +3,41 @@
 Follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-09-17
+
+### Added
+
+- Test suite covering every module under `src/dwch/` and every
+  command, plus a full lifecycle test from `init` through
+  `close --freeze` to a second phase. Uses real filesystem and git
+  adapters on `tmp_path`; three small fakes for clipboard, process,
+  and tokenizer.
+- GitHub Actions workflow running ruff, ruff format check, and
+  pytest on Python 3.11 and 3.12.
+- `CONTRIBUTING.md` with the dev workflow and the architectural
+  invariants.
+- `pytest`, `pytest-cov` as dev dependencies; `[tool.pytest.ini_options]`
+  with `testpaths`, `addopts`, and `pythonpath`.
+
+### Fixed
+
+- **Commands could not be imported.** Six modules imported
+  `..rules` (resolving to the nonexistent
+  `dwch.application.rules`) instead of `...domain.rules`. The bug
+  lived since 0.2.0 and was invisible to ruff, which does not
+  resolve imports. Affected: `apply`, `close`, `health`,
+  `new_phase`, `verify`, and `context`.
+- **Absolute paths were accepted on Windows.** `Path("/abs").is_absolute()`
+  returns False on Windows, so config values like
+  `paths.steps = "/abs"`, roadmap `module = "/abs.py"`, and step
+  message paths starting with `/` slipped past validation. The
+  three validators now reject a leading `/` or `\` explicitly, on
+  every platform.
+
+### Changed
+
+- No user-facing behaviour changes beyond the two fixes above.
+
 ## [0.2.2] - 2026-09-17
 
 ### Fixed

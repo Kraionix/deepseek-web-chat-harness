@@ -27,12 +27,12 @@ from argparse import Namespace
 from datetime import UTC, datetime
 from importlib.resources import files
 
+from ...domain.rules import is_roadmap_frozen
 from ...shared.errors import HarnessError
 from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..handoff import update_metadata
-from ..rules import is_roadmap_frozen
 from ..state import load_state, save_state, with_updates
 
 # Characters that are unsafe in a directory name on any of the

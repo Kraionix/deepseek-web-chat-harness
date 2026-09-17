@@ -33,6 +33,23 @@ pip install -e .
 
 Only runtime dependency is `tokenizers` (HuggingFace).
 
+For development, install the dev extras:
+
+```
+pip install -e ".[dev]"
+```
+
+This adds `ruff`, `pytest`, and `pytest-cov`. Run the checks with:
+
+```
+ruff check .
+ruff format --check .
+pytest -q
+```
+
+The test suite uses real filesystem and git adapters on a temporary
+directory and never touches the network.
+
 ## Quickstart
 
 ```
