@@ -4,7 +4,7 @@ The user has these commands available. Ask for the ones you need.
 
 | Command | What it does |
 |---|---|
-| `dwch health` | Check the environment. |
+| `dwch health` | Check the environment and roadmap state. |
 | `dwch bootstrap --clipboard` | Rebuild the opening message. |
 | `dwch apply NN` | Write the files of step NN. |
 | `dwch verify NN` | Run checks, commit, produce the report. |
@@ -12,9 +12,11 @@ The user has these commands available. Ask for the ones you need.
 | `dwch map --clipboard` | Send the module interface map. |
 | `dwch map --tree --clipboard` | Map plus a directory tree. |
 | `dwch rollback --yes` | Undo the last step. |
-| `dwch new-phase NAME` | Start a new phase. |
-| `dwch count PATH` | Count tokens in a file or tree. |
+| `dwch new-phase NAME --kind planning` | Start a planning phase. |
+| `dwch new-phase NAME --kind development` | Start a development phase. |
+| `dwch close --freeze` | Freeze the roadmap at the end of a planning phase. |
 | `dwch close` | Finalize the session. |
+| `dwch count PATH` | Count tokens in a file or tree. |
 
 ## When to ask
 

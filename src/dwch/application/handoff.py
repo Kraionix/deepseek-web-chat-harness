@@ -33,10 +33,15 @@ def update_metadata(fs: FilesystemPort, project_root: Path, state: State) -> Non
     text = fs.read_text(handoff)
     if BEGIN not in text or END not in text:
         return
+    frozen = "true" if state.roadmap_frozen else "false"
     meta = (
         f"{BEGIN}\n"
         f"phase: {state.current_phase}\n"
-        f"step: {state.current_step}/{state.total_steps}\n"
+        f"kind: {state.phase_kind}\n"
+        f"step: {state.current_step}\n"
+        f"roadmap_version: {state.roadmap_version}\n"
+        f"roadmap_step: {state.roadmap_step}\n"
+        f"frozen: {frozen}\n"
         f"last_commit: {state.last_commit or '(none)'}\n"
         f"closed: {state.last_closed}\n"
         f"{END}"

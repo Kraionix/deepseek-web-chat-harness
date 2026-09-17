@@ -11,6 +11,8 @@ import sys
 from argparse import Namespace
 
 from ...shared.errors import HarnessError
+from .. import lock as lock_mod
+from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..state import load_state
@@ -26,6 +28,7 @@ def cmd_health(_args: Namespace, deps: Deps, _config) -> int:
     checks.append(_check_layout(deps))
     checks.append(_check_state(deps))
     checks.append(_check_tokenizer(deps))
+    checks.append(_check_roadmap(deps))
 
     any_critical_failed = False
     for name, ok, detail, critical in checks:
@@ -52,21 +55,31 @@ def _check_venv() -> tuple[str, bool, str, bool]:
 def _check_git(deps: Deps) -> tuple[str, bool, str, bool]:
     """Check git state.
 
-    A tree with only untracked files (e.g. a fresh `.harness/`
-    right after `init`, before the user commits it) is not a
-    problem: the harness does not need a pristine tree to run.
+    Two cases are not errors:
+
+    - Untracked files only (e.g. a fresh `.harness/` right after
+      `init`, before the user commits it). The harness does not
+      need a pristine tree to run.
+    - An empty repository with no commits yet. `git rev-parse` has
+      nothing to resolve, but `git status` still works. Report the
+      branch as `(no commits)`.
+
     Only tracked, uncommitted modifications count as dirty here.
-    Operations that *do* require a clean tree (`close`,
-    `new-phase`, `rollback`) call `GitPort.is_clean` directly.
     """
     root = deps.project_root
     if not deps.fs.is_dir(root / ".git"):
         return ("git", False, "no .git directory", True)
+
     try:
-        branch = deps.git.current_branch(root)
         lines = deps.git.status_short(root)
     except HarnessError as exc:
         return ("git", False, str(exc), True)
+
+    try:
+        branch = deps.git.current_branch(root)
+    except HarnessError:
+        # Empty repository: no commits, so HEAD cannot be resolved.
+        branch = "(no commits)"
 
     tracked = [line for line in lines if not line.startswith("??")]
     if tracked:
@@ -95,20 +108,18 @@ def _check_state(deps: Deps) -> tuple[str, bool, str, bool]:
         state = load_state(deps.fs, deps.project_root)
     except HarnessError as exc:
         return ("state", False, str(exc), True)
-    return (
-        "state",
-        True,
-        f"phase={state.current_phase} step={state.current_step}",
-        True,
+    detail = (
+        f"phase={state.current_phase} kind={state.phase_kind} step={state.current_step}"
     )
+    return ("state", True, detail, True)
 
 
 def _check_tokenizer(deps: Deps) -> tuple[str, bool, str, bool]:
     try:
-        _config = load_config(deps.fs, deps.project_root)
+        config = load_config(deps.fs, deps.project_root)
     except HarnessError:
         return ("tokenizer", False, "config not readable", True)
-    path = _config.tokenizer_path
+    path = config.tokenizer_path
     if not deps.fs.exists(path):
         return ("tokenizer", False, f"missing: {path.name}", True)
     try:
@@ -116,6 +127,50 @@ def _check_tokenizer(deps: Deps) -> tuple[str, bool, str, bool]:
     except HarnessError as exc:
         return ("tokenizer", False, str(exc), True)
     return ("tokenizer", True, path.name, True)
+
+
+def _check_roadmap(deps: Deps) -> tuple[str, bool, str, bool]:
+    """Report the roadmap and lock state, if any.
+
+    The check is informational: a missing roadmap is OK, and a
+    changed architecture document is reported but does not fail
+    health. Its `critical` flag is always False.
+    """
+    try:
+        config = load_config(deps.fs, deps.project_root)
+    except HarnessError:
+        return ("roadmap", False, "config not readable", False)
+
+    roadmap_path = deps.project_root / config.roadmap.get(
+        "path", ".harness/roadmap.toml"
+    )
+    if not deps.fs.exists(roadmap_path):
+        return ("roadmap", True, "none", False)
+
+    try:
+        roadmap = roadmap_mod.load(deps.fs, roadmap_path)
+    except HarnessError as exc:
+        return ("roadmap", False, str(exc), False)
+
+    lock_path = deps.project_root / config.roadmap.get(
+        "lock_path", ".harness/roadmap.lock"
+    )
+    lock = lock_mod.load(deps.fs, lock_path)
+    if lock is None:
+        detail = f"v{roadmap.meta.version} not frozen"
+        return ("roadmap", True, detail, False)
+
+    architecture_paths = [
+        deps.project_root / p for p in config.context.get("architecture", [])
+    ]
+    problems = lock_mod.check(
+        deps.fs, lock, deps.project_root, roadmap_path, architecture_paths
+    )
+    if problems:
+        detail = f"v{lock.version} frozen; drift: {len(problems)} file(s)"
+        return ("roadmap", False, detail, False)
+    detail = f"v{lock.version} frozen at {lock.commit or '(no commit)'}"
+    return ("roadmap", True, detail, False)
 
 
 __all__ = ["cmd_health"]

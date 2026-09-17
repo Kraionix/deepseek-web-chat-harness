@@ -118,6 +118,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create a git tag for this session.",
     )
+    p_close.add_argument(
+        "--freeze",
+        action="store_true",
+        help=(
+            "Freeze the roadmap: compute hashes of roadmap.toml and "
+            "architecture documents, write .harness/roadmap.lock, and "
+            "mark state as frozen. Valid only in a planning phase."
+        ),
+    )
 
     p_read = sub.add_parser("read", help="Wrap a file in step markers.")
     p_read.add_argument("path", help="File, glob, or directory.")
@@ -139,6 +148,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_np = sub.add_parser("new-phase", help="Start a new phase.")
     p_np.add_argument("name", help="Phase name (no spaces).")
+    p_np.add_argument(
+        "--kind",
+        choices=["planning", "development"],
+        default="development",
+        help=(
+            "Kind of phase. Planning sessions produce a roadmap; "
+            "development sessions execute a frozen one."
+        ),
+    )
 
     p_count = sub.add_parser("count", help="Count tokens.")
     p_count.add_argument("path", help="File or directory.")

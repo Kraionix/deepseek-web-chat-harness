@@ -39,6 +39,13 @@ class CliGit:
             return False
         return not out.strip()
 
+    def is_clean_tracked(self, cwd: Path) -> bool:
+        try:
+            lines = self.status_short(cwd)
+        except GitError:
+            return False
+        return not any(not line.startswith("??") for line in lines)
+
     def status_short(self, cwd: Path) -> list[str]:
         out = self._run(cwd, "status", "--short")
         return [line for line in out.splitlines() if line.strip()]

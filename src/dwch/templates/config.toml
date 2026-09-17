@@ -2,7 +2,7 @@
 # `dwch` only reads this file; it does not rewrite it.
 
 [harness]
-version = "0.1.0"
+version = "0.2.0"
 
 [project]
 name = "unnamed"
@@ -16,8 +16,16 @@ phases = "phases"
 essential = ["AGENTS.md", "STATE.md"]
 # Files listed by name only; the AI asks for them on demand.
 references = ["docs/decisions.md"]
+# Frozen architecture documents included in every development bootstrap.
+architecture = ["docs/architecture.md"]
 # Root of the module interface map.
 map_root = "src"
+
+[roadmap]
+path = ".harness/roadmap.toml"
+lock_path = ".harness/roadmap.lock"
+deviations_path = ".harness/deviations"
+lock_required = false
 
 [verify]
 # Commands run by `dwch verify` in order. `required = false` means a
@@ -26,10 +34,13 @@ commands = [
     { name = "syntax", command = ["python", "-m", "compileall", "-q", "src"] },
     { name = "lint", command = ["ruff", "check", "."] },
 ]
+# Extra commands run only during a planning phase.
+planning_commands = []
 
 [bootstrap]
 max_tokens = 10000
 recent_reports = 1
+recent_deviations = 10
 include_module_map = true
 truncate = true
 

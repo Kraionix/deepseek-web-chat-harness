@@ -1,30 +1,38 @@
 """`dwch verify NN` — run checks, commit, produce the report.
 
-The report is written to `steps/report-NN.txt` and optionally copied
-to the clipboard. It is the only channel through which the AI learns
-what happened, so it is deliberately complete: every check's full
-stdout and stderr, and the commit hash on success.
+The report is written to `steps/{phase}/report-NN.txt` and
+optionally copied to the clipboard. It is the only channel through
+which the AI learns what happened, so it is deliberately complete:
+every check's full stdout and stderr, the commit hash on success,
+and any deviations recorded against the roadmap.
 
 On any required check failing, the commit is skipped but the report
 is still written. The AI needs to see the failure to fix it.
 
-On success, `verify` also updates `state.toml` (`current_step`,
-`total_steps`, `last_commit_date`) before committing, so the state
-file is included in the same commit as the step's files. It does
-not touch `last_commit` — that field is refreshed by `close` and
-`new-phase`, which know the hash of the commit they just made.
+On success, `verify` updates `state.toml` (current_step,
+roadmap_step, last_commit_date) before committing, so the state
+file is included in the same commit as the step's files.
+
+Auto-deviations are computed in memory on every run, so the report
+always shows them, but they are written to disk only when the run
+succeeds. A failed run must not leave the tree dirty. A step that
+declares a blocker suppresses auto-deviations: the missing files
+are intentional, and an extra `missing-file` entry would only add
+noise.
 """
 
 from __future__ import annotations
 
-import io
 import sys
 from argparse import Namespace
-from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 
-from ...domain.models import CheckResult, FileSpec, Report, State
+from ...domain.models import CheckResult, Deviation, FileSpec, Report
+from ...domain.rules import has_blocker, is_substantive
 from ...shared.errors import FormatError, HarnessError
+from .. import deviations as dev_mod
+from .. import lock as lock_mod
+from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..format import (
@@ -32,18 +40,38 @@ from ..format import (
     render_report,
     summarize_check,
 )
-from ..state import load_state, save_state
+from ..state import load_state, save_state, with_updates
+from ..verify_checks import (
+    check_architecture_lock,
+    check_compile,
+    check_roadmap_files,
+    check_roadmap_interfaces,
+    check_roadmap_step,
+    compute_auto_deviations,
+    run_configured,
+)
 
 
 def cmd_verify(args: Namespace, deps: Deps, _config) -> int:
     """Verify a step. Returns 0 on success, 1 on check failure, 2 on error."""
     try:
         config = load_config(deps.fs, deps.project_root)
+        state = load_state(deps.fs, deps.project_root)
     except HarnessError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    steps_dir = deps.project_root / config.paths.get("steps", "steps")
+    if state.current_phase == "unset" or state.phase_kind == "unset":
+        print(
+            "error: no active phase; run "
+            "`dwch new-phase NAME --kind {planning|development}` first",
+            file=sys.stderr,
+        )
+        return 2
+
+    steps_dir = (
+        deps.project_root / config.paths.get("steps", "steps") / state.current_phase
+    )
     step_file = steps_dir / f"step-{args.step}.txt"
     apply_log_path = steps_dir / f"apply-{args.step}.log"
 
@@ -62,9 +90,7 @@ def cmd_verify(args: Namespace, deps: Deps, _config) -> int:
         )
         return 2
 
-    missing = [
-        spec.path for spec in specs if not (deps.project_root / spec.path).is_file()
-    ]
+    missing = [s.path for s in specs if not (deps.project_root / s.path).is_file()]
     if missing:
         print(
             "error: step references files that do not exist on disk: "
@@ -80,33 +106,81 @@ def cmd_verify(args: Namespace, deps: Deps, _config) -> int:
         else ""
     )
 
-    paths = [spec.path for spec in specs]
+    roadmap_path = deps.project_root / config.roadmap.get(
+        "path", ".harness/roadmap.toml"
+    )
+    roadmap = None
+    if deps.fs.exists(roadmap_path):
+        try:
+            roadmap = roadmap_mod.load(deps.fs, roadmap_path)
+        except HarnessError:
+            roadmap = None
+
+    is_planning = state.phase_kind == "planning"
+    is_development = state.phase_kind == "development"
+    dev_dir = deps.project_root / config.roadmap.get(
+        "deviations_path", ".harness/deviations"
+    )
+
     checks: list[CheckResult] = []
 
-    # The built-in compile check is named "compile", not "syntax":
-    # the default config also defines a command named "syntax"
-    # (`compileall`), and having two lines with the same name in the
-    # output is confusing.
-    compile_check = _run_compile(paths, deps)
-    checks.append(compile_check)
-    print(summarize_check(compile_check))
+    if is_planning:
+        checks.extend(_planning_checks(specs, deps, config, roadmap))
+    elif is_development:
+        checks.extend(_development_checks(args, deps, config, state, roadmap, specs))
+    else:
+        print(
+            "error: no phase is active. Run `dwch new-phase NAME --kind ...` first.",
+            file=sys.stderr,
+        )
+        return 2
 
-    for spec in config.verify_commands:
-        check = _run_verify_command(spec, deps)
-        checks.append(check)
+    for check in checks:
         print(summarize_check(check))
 
     all_required_ok = all(c.exit_code == 0 for c in checks if c.required)
 
-    commit_hash = None
-    commit_message = None
+    # Declared deviations are read before auto-detection: a blocker
+    # is a deliberate "I cannot do this", and auto-flagging the
+    # missing files on top of it would only add noise.
+    declared = dev_mod.load_step(deps.fs, dev_dir, int(args.step))
+
+    auto_devs: list[Deviation] = []
+    if (
+        is_development
+        and state.roadmap_frozen
+        and roadmap is not None
+        and not has_blocker(declared)
+    ):
+        current = roadmap_mod.find_step(roadmap, state.roadmap_step + 1)
+        if current is not None:
+            auto_devs = compute_auto_deviations(specs, current)
+
+    before_step = state.roadmap_step
+    after_step = before_step
+    commit_hash: str | None = None
+    commit_message: str | None = None
+
     if all_required_ok:
         commit_message = f"step {args.step}: applied and verified"
-        # Update state before the commit so `.harness/state.toml`
-        # is picked up by the same commit. This keeps the working
-        # tree clean for the next lifecycle command, all of which
-        # refuse to run on a dirty tree.
-        _update_state(deps, int(args.step))
+        if auto_devs:
+            dev_mod.write_auto(deps.fs, dev_dir, int(args.step), auto_devs)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        advance_roadmap = (
+            is_development
+            and state.roadmap_frozen
+            and roadmap is not None
+            and is_substantive(specs)
+        )
+        updated = with_updates(
+            state,
+            current_step=int(args.step),
+            last_commit_date=now,
+            roadmap_step=state.roadmap_step + (1 if advance_roadmap else 0),
+        )
+        save_state(deps.fs, deps.project_root, updated)
+        if advance_roadmap:
+            after_step = before_step + 1
         try:
             commit_hash = deps.git.commit_all(deps.project_root, commit_message)
         except HarnessError as exc:
@@ -117,20 +191,22 @@ def cmd_verify(args: Namespace, deps: Deps, _config) -> int:
     elif not all_required_ok:
         print("commit: skipped (required check failed)")
 
+    all_devs = tuple(declared) + tuple(auto_devs)
     report = Report(
         step_number=int(args.step),
         apply_log=apply_log,
         checks=tuple(checks),
         commit_hash=commit_hash,
         commit_message=commit_message,
+        deviations=all_devs,
+        roadmap_position=(before_step, after_step) if is_development else None,
         notes="",
         question="",
     )
     rendered = render_report(report)
-    (steps_dir / f"report-{args.step}.txt").write_text(
-        rendered, encoding="utf-8", newline="\n"
-    )
-    print(f"report: {steps_dir / f'report-{args.step}.txt'}")
+    report_path = steps_dir / f"report-{args.step}.txt"
+    deps.fs.write_text(report_path, rendered)
+    print(f"report: {report_path}")
 
     if args.clipboard:
         if deps.clipboard.write(rendered):
@@ -154,106 +230,98 @@ def _parse_step_or_none(text: str) -> list[FileSpec] | None:
         return None
 
 
-def _update_state(deps: Deps, step_number: int) -> None:
-    """Record progress in `.harness/state.toml`.
+def _planning_checks(
+    specs: list[FileSpec],
+    deps: Deps,
+    config,
+    roadmap,
+) -> list[CheckResult]:
+    """Checks that run only in a planning phase.
 
-    Called before `commit_all` on a successful verify. Failures are
-    non-fatal: a corrupt or missing state file only means the
-    bootstrap's Progress section is stale, not that the step is
-    invalid. The report already records what actually happened.
-
-    `last_commit` is deliberately left as-is: the commit hash is
-    not known yet, and amending or a second commit just for one
-    field would be worse than a slightly stale value. `close` and
-    `new-phase` refresh it with the correct hash.
+    A roadmap written by the architect is validated structurally so
+    that a malformed file cannot be frozen. The roadmap path is
+    resolved from config, not hard-coded.
     """
-    try:
-        state = load_state(deps.fs, deps.project_root)
-    except HarnessError as exc:
-        print(f"warning: could not read state: {exc}", file=sys.stderr)
-        return
-    now = datetime.now(UTC).isoformat(timespec="seconds")
-    updated = State(
-        harness_version=state.harness_version,
-        current_phase=state.current_phase,
-        current_step=step_number,
-        total_steps=max(state.total_steps, step_number),
-        last_commit=state.last_commit,
-        last_commit_date=now,
-        last_opened=state.last_opened,
-        last_closed=state.last_closed,
+    out: list[CheckResult] = []
+
+    roadmap_rel = str(config.roadmap.get("path", ".harness/roadmap.toml")).replace(
+        "\\", "/"
     )
-    try:
-        save_state(deps.fs, deps.project_root, updated)
-    except HarnessError as exc:
-        print(f"warning: could not save state: {exc}", file=sys.stderr)
+    wrote_roadmap = any(s.path.replace("\\", "/") == roadmap_rel for s in specs)
+    if wrote_roadmap:
+        if roadmap is None:
+            out.append(
+                CheckResult(
+                    name="roadmap-structure",
+                    command=("roadmap-structure",),
+                    exit_code=1,
+                    stdout="",
+                    stderr="roadmap file was written but could not be parsed",
+                    required=True,
+                )
+            )
+        else:
+            problems = roadmap_mod.validate(roadmap)
+            out.append(
+                CheckResult(
+                    name="roadmap-structure",
+                    command=("roadmap-structure",),
+                    exit_code=0 if not problems else 1,
+                    stdout="\n".join(problems) if problems else "ok",
+                    stderr="",
+                    required=True,
+                )
+            )
+
+    out.extend(run_configured(list(config.planning_commands), deps))
+    return out
 
 
-def _run_compile(paths: list[str], deps: Deps) -> CheckResult:
-    """Run `compile()` on every `.py` file listed in the step."""
-    py_files = [p for p in paths if p.endswith(".py")]
-    if not py_files:
-        return CheckResult(
-            name="compile",
-            command=("compile",),
-            exit_code=0,
-            stdout="(no python files)",
-            stderr="",
-            required=True,
+def _development_checks(
+    args: Namespace,
+    deps: Deps,
+    config,
+    state,
+    roadmap,
+    specs: list[FileSpec],
+) -> list[CheckResult]:
+    """Checks that run only in a development phase."""
+    out: list[CheckResult] = [check_compile(specs, deps)]
+
+    if state.roadmap_frozen and roadmap is not None:
+        out.append(check_roadmap_step(int(args.step), state))
+        current = roadmap_mod.find_step(roadmap, state.roadmap_step + 1)
+        if current is not None:
+            out.append(check_roadmap_files(specs, current))
+            out.append(
+                check_roadmap_interfaces(
+                    deps.fs, deps.project_root, specs, current, roadmap
+                )
+            )
+
+        roadmap_path = deps.project_root / config.roadmap.get(
+            "path", ".harness/roadmap.toml"
         )
-    buf = io.StringIO()
-    failed = False
-    with redirect_stdout(buf), redirect_stderr(buf):
-        for rel in py_files:
-            target = deps.project_root / rel
-            try:
-                source = target.read_text(encoding="utf-8")
-                compile(source, str(target), "exec")
-            except (SyntaxError, ValueError) as exc:
-                failed = True
-                print(f"{rel}: {exc}")
-    return CheckResult(
-        name="compile",
-        command=("compile",),
-        exit_code=1 if failed else 0,
-        stdout=buf.getvalue().rstrip(),
-        stderr="",
-        required=True,
-    )
-
-
-def _run_verify_command(spec: dict, deps: Deps) -> CheckResult:
-    name = str(spec.get("name", "unnamed"))
-    command = tuple(spec.get("command", []))
-    required = bool(spec.get("required", True))
-    if not command:
-        return CheckResult(
-            name=name,
-            command=(),
-            exit_code=1,
-            stdout="",
-            stderr="(no command configured)",
-            required=required,
+        lock_path = deps.project_root / config.roadmap.get(
+            "lock_path", ".harness/roadmap.lock"
         )
-    try:
-        result = deps.process.run(list(command), cwd=deps.project_root)
-    except HarnessError as exc:
-        return CheckResult(
-            name=name,
-            command=command,
-            exit_code=127,
-            stdout="",
-            stderr=str(exc),
-            required=required,
+        architecture_paths = [
+            deps.project_root / p for p in config.context.get("architecture", [])
+        ]
+        lock = lock_mod.load(deps.fs, lock_path)
+        arch_check = check_architecture_lock(
+            deps.fs,
+            lock,
+            deps.project_root,
+            roadmap_path,
+            architecture_paths,
+            required=bool(config.roadmap.get("lock_required", False)),
         )
-    return CheckResult(
-        name=name,
-        command=command,
-        exit_code=result.exit_code,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        required=required,
-    )
+        if arch_check is not None:
+            out.append(arch_check)
+
+    out.extend(run_configured(list(config.verify_commands), deps))
+    return out
 
 
 __all__ = ["cmd_verify"]

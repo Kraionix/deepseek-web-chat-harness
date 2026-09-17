@@ -1,12 +1,13 @@
 """`dwch rollback` — undo the last step.
 
-Reverts the last commit, updates state, marks the step as rolled
-back, and commits the state change. Requires `--yes` because the
-operation discards committed work.
+Reverts the last commit, reloads state from the previous commit,
+increments `rollback_count`, and commits a marker. Requires `--yes`
+because the operation discards committed work.
 
-`last_commit` is not rewritten: it records the hash known at the
-last lifecycle transition, not HEAD after every operation. That is
-consistent with `verify`, which also leaves it alone.
+`current_step` and `roadmap_step` are not modified directly: the
+`git reset --hard` restores them from the previous commit's
+`state.toml`. The commit that follows exists only to make the tree
+clean for the next command.
 """
 
 from __future__ import annotations
@@ -15,11 +16,10 @@ import sys
 from argparse import Namespace
 from datetime import UTC, datetime
 
-from ...domain.models import State
 from ...shared.errors import HarnessError
 from ..config import load_config
 from ..deps import Deps
-from ..state import load_state, save_state
+from ..state import load_state, save_state, with_updates
 
 
 def cmd_rollback(args: Namespace, deps: Deps, _config) -> int:
@@ -38,8 +38,13 @@ def cmd_rollback(args: Namespace, deps: Deps, _config) -> int:
         print("error: working tree is dirty; commit or stash first", file=sys.stderr)
         return 2
 
-    state = load_state(deps.fs, deps.project_root)
-    if state.current_step <= 0:
+    try:
+        before = load_state(deps.fs, deps.project_root)
+    except HarnessError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if before.current_step <= 0:
         print("error: no step to roll back", file=sys.stderr)
         return 2
 
@@ -49,32 +54,32 @@ def cmd_rollback(args: Namespace, deps: Deps, _config) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    new_step = state.current_step - 1
+    # State on disk is now the previous commit's state. Reload it,
+    # then bump only the rollback marker so the marker commit is
+    # non-empty.
+    try:
+        after = load_state(deps.fs, deps.project_root)
+    except HarnessError as exc:
+        print(f"error: state after reset: {exc}", file=sys.stderr)
+        return 2
+
     now = datetime.now(UTC).isoformat(timespec="seconds")
-    updated = State(
-        harness_version=state.harness_version,
-        current_phase=state.current_phase,
-        current_step=new_step,
-        total_steps=new_step,
-        last_commit=state.last_commit,
+    updated = with_updates(
+        after,
+        rollback_count=after.rollback_count + 1,
         last_commit_date=now,
-        last_opened=state.last_opened,
-        last_closed=state.last_closed,
     )
     save_state(deps.fs, deps.project_root, updated)
 
-    # Commit the state change so the tree is clean for the next
-    # command. The reset already discarded the step's commit; this
-    # commit records the rollback itself.
     try:
         commit = deps.git.commit_all(
-            deps.project_root, f"chore: rollback step {state.current_step}"
+            deps.project_root, f"chore: rollback step {before.current_step}"
         )
         print(f"commit: {commit}")
     except HarnessError as exc:
         print(f"warning: could not commit rollback: {exc}", file=sys.stderr)
 
-    print(f"rolled back to step {new_step}")
+    print(f"rolled back to step {after.current_step}")
     return 0
 
 

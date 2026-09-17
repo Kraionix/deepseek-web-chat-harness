@@ -86,9 +86,19 @@ class GitPort(Protocol):
         """True when `git status --porcelain` is empty.
 
         Untracked files count as dirty. Use this before operations
-        that assume a known working tree (close, new-phase,
-        rollback). For a lenient "is the environment sane" view
-        that ignores untracked files, use `status_short`.
+        that assume a known working tree and will not sweep the tree
+        into a commit (notably `rollback`). For operations that
+        commit everything anyway, use `is_clean_tracked`.
+        """
+        ...
+
+    def is_clean_tracked(self, cwd: Path) -> bool:
+        """True when no tracked file is modified or deleted.
+
+        Untracked files do not count. Use this for bookkeeping
+        transitions (`new-phase`, `close`) that will commit the
+        whole tree via `commit_all`: untracked files are expected
+        to be swept in, so their presence is not an error.
         """
         ...
 

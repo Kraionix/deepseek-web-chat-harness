@@ -21,6 +21,17 @@ from ..config import config_to_toml
 from ..deps import Deps
 from ..state import initial_state, save_state
 
+_TEMPLATES = (
+    "session-protocol.md",
+    "step-format.md",
+    "report-format.md",
+    "planning-handoff.md",
+    "development-handoff.md",
+    "roadmap-format.md",
+    "deviation-format.md",
+    "toolbox.md",
+)
+
 
 def cmd_init(args: Namespace, deps: Deps, _config) -> int:
     """Install the harness. Returns 0 on success, 2 on error."""
@@ -48,16 +59,17 @@ def cmd_init(args: Namespace, deps: Deps, _config) -> int:
         return 2
 
     print(f"initialized harness at {harness_dir}")
-    print("next: `dwch health`, then `dwch bootstrap --clipboard`")
+    print("next: `dwch health`, then `dwch new-phase NAME --kind planning`")
     return 0
 
 
 def _write_harness_gitignore(deps: Deps, harness_dir: Path) -> None:
     """Ignore the downloaded tokenizer data inside `.harness/`.
 
-    The rest of `.harness/` (config, state, handoff, templates) is
-    meant to be committed: it is the session's portable state. Only
-    the multi-megabyte tokenizer file is local-cache material.
+    The rest of `.harness/` (config, state, handoff, roadmap, lock,
+    deviations, templates) is meant to be committed: it is the
+    session's portable state. Only the multi-megabyte tokenizer file
+    is local-cache material.
     """
     path = harness_dir / ".gitignore"
     if deps.fs.exists(path):
@@ -71,7 +83,7 @@ def _write_harness_gitignore(deps: Deps, harness_dir: Path) -> None:
 def _write_steps_gitignore(deps: Deps, steps_dir: Path) -> None:
     """Mark `steps/` as session-local.
 
-    `steps/` holds the raw step messages, apply logs, and reports.
+    `steps/` holds per-phase step messages, apply logs, and reports.
     They are session artifacts, not project source. Making the
     directory self-ignoring keeps the working tree clean for the
     lifecycle commands (`close`, `new-phase`, `rollback`), which
@@ -90,13 +102,7 @@ def _write_templates(deps: Deps, harness_dir: Path) -> None:
     """Copy the shipped templates into `.harness/`."""
     from importlib.resources import files
 
-    for name in (
-        "session-protocol.md",
-        "step-format.md",
-        "report-format.md",
-        "handoff.md",
-        "toolbox.md",
-    ):
+    for name in _TEMPLATES:
         target = harness_dir / name
         if deps.fs.exists(target):
             continue

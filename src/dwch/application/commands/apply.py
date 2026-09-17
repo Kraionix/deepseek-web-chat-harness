@@ -4,9 +4,9 @@ The message is read from the clipboard, or from `--from-file`.
 Before any file is written, the entire message is parsed and every
 path is validated. On any error, nothing is written.
 
-The raw message is saved to `steps/step-NN.txt` for the record,
-even when parsing fails. This makes a failed apply diagnosable
-without asking the AI to re-send.
+The raw message is saved to `steps/{phase}/step-NN.txt` for the
+record, even when parsing fails. This makes a failed apply
+diagnosable without asking the AI to re-send.
 """
 
 from __future__ import annotations
@@ -24,17 +24,28 @@ from ..format import (
     parse_step_message,
     validate_paths,
 )
+from ..state import load_state
 
 
 def cmd_apply(args: Namespace, deps: Deps, _config) -> int:
     """Apply a step. Returns 0 on success, 1 on parse error, 2 on I/O."""
     try:
         config = load_config(deps.fs, deps.project_root)
+        state = load_state(deps.fs, deps.project_root)
     except HarnessError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    steps_dir = deps.project_root / config.paths.get("steps", "steps")
+    if state.current_phase == "unset" or state.phase_kind == "unset":
+        print(
+            "error: no active phase; run "
+            "`dwch new-phase NAME --kind {planning|development}` first",
+            file=sys.stderr,
+        )
+        return 2
+
+    steps_root = deps.project_root / config.paths.get("steps", "steps")
+    steps_dir = steps_root / state.current_phase
     step_text = _read_message(args, deps)
     if step_text is None:
         return 2
@@ -43,7 +54,7 @@ def cmd_apply(args: Namespace, deps: Deps, _config) -> int:
         return 1
 
     deps.fs.mkdir(steps_dir, parents=True)
-    _ensure_steps_gitignore(deps, steps_dir)
+    _ensure_steps_gitignore(deps, steps_root)
     step_file = steps_dir / f"step-{args.step}.txt"
     deps.fs.write_text(step_file, step_text)
 
@@ -77,16 +88,15 @@ def cmd_apply(args: Namespace, deps: Deps, _config) -> int:
 
     log_lines = [
         f"step:  {args.step}",
-        f"saved: {step_file.relative_to(deps.project_root)}",
+        f"phase: {state.current_phase}",
+        f"saved: {step_file.relative_to(deps.project_root).as_posix()}",
         f"files: {len(written)}",
     ]
     for path, existed in written:
         verb = "overwrote" if existed else "wrote"
         log_lines.append(f"  {verb} {path}")
     log_text = "\n".join(log_lines) + "\n"
-    (steps_dir / f"apply-{args.step}.log").write_text(
-        log_text, encoding="utf-8", newline="\n"
-    )
+    deps.fs.write_text(steps_dir / f"apply-{args.step}.log", log_text)
     sys.stdout.write(log_text)
     return 0
 
@@ -109,14 +119,15 @@ def _read_message(args: Namespace, deps: Deps) -> str | None:
     return text
 
 
-def _ensure_steps_gitignore(deps: Deps, steps_dir: Path) -> None:
+def _ensure_steps_gitignore(deps: Deps, steps_root: Path) -> None:
     """Write `steps/.gitignore` if missing.
 
     `init` writes this file for new projects. Calling it here lets
-    projects initialized before this rule self-heal on the next
-    apply, without requiring a full re-init.
+    projects self-heal on the next apply, without requiring a full
+    re-init. The pattern `*` ignores every file and subdirectory
+    under `steps/`, including phase directories.
     """
-    gitignore = steps_dir / ".gitignore"
+    gitignore = steps_root / ".gitignore"
     if deps.fs.exists(gitignore):
         return
     deps.fs.write_text(

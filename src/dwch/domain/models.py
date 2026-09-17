@@ -13,61 +13,38 @@ from pathlib import Path
 from typing import Any
 
 
-class StepStatus(StrEnum):
-    """Lifecycle state of one step.
+class PhaseKind(StrEnum):
+    """Kind of phase a session belongs to.
 
-    `PENDING`   — not yet applied.
-    `APPLIED`   — files written by `apply`, not yet verified.
-    `VERIFIED`  — `verify` succeeded, commit made.
-    `FAILED`    — `verify` ran but at least one required check failed.
-    `ROLLED_BACK` — undone by `rollback`.
+    `PLANNING` sessions produce design artifacts and a roadmap.
+    `DEVELOPMENT` sessions execute a frozen roadmap.
+    `UNSET` is the initial value before any `new-phase`.
     """
 
-    PENDING = "pending"
-    APPLIED = "applied"
-    VERIFIED = "verified"
-    FAILED = "failed"
-    ROLLED_BACK = "rolled_back"
+    PLANNING = "planning"
+    DEVELOPMENT = "development"
+    UNSET = "unset"
 
 
-class PhaseStatus(StrEnum):
-    """Lifecycle state of one phase."""
+class DeviationType(StrEnum):
+    """Kind of deviation a step records against the roadmap.
 
-    PENDING = "pending"
-    ACTIVE = "active"
-    COMPLETED = "completed"
-
-
-@dataclass(frozen=True, slots=True)
-class Step:
-    """One unit of work: a batch of files produced by the AI.
-
-    `files` is the list of relative paths the step's message declared.
-    `status` reflects the last operation performed on this step.
-    Timestamps are ISO-8601 strings; the harness never parses them
-    back into datetimes.
+    `EXTRA_FILE`       — file not listed in `step.files`.
+    `MISSING_FILE`     — file listed in `step.files` not written.
+    `INTERFACE_CHANGE` — public symbol added, removed, or renamed.
+    `BUGFIX_PRIOR`     — change to code from a previous step.
+    `ASSUMPTION`       — the spec was incomplete; the coder decided.
+    `PLAN_CORRECTION`  — the step spec was wrong, but workable.
+    `BLOCKER`          — the step is impossible as specified.
     """
 
-    number: int
-    files: tuple[str, ...]
-    status: StepStatus = StepStatus.PENDING
-    applied_at: str | None = None
-    verified_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class Phase:
-    """A named group of steps with a shared goal.
-
-    Phase names are `NN-slug` (e.g. `01-implementation`). The numeric
-    prefix orders phases; the slug is a short label.
-    """
-
-    name: str
-    steps: tuple[Step, ...]
-    status: PhaseStatus = PhaseStatus.PENDING
-    started_at: str | None = None
-    completed_at: str | None = None
+    EXTRA_FILE = "extra-file"
+    MISSING_FILE = "missing-file"
+    INTERFACE_CHANGE = "interface-change"
+    BUGFIX_PRIOR = "bugfix-prior"
+    ASSUMPTION = "assumption"
+    PLAN_CORRECTION = "plan-correction"
+    BLOCKER = "blocker"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,12 +90,115 @@ class CheckResult:
 
 
 @dataclass(frozen=True, slots=True)
+class Deviation:
+    """One recorded deviation from the roadmap.
+
+    `auto` is True when `verify` detected the deviation itself;
+    False when the coder declared it in a deviation file.
+    """
+
+    type: DeviationType
+    affected: tuple[str, ...]
+    reason: str
+    detail: str
+    auto: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RoadmapMeta:
+    """Metadata header of `.harness/roadmap.toml`.
+
+    `version` is a positive integer. A new architect session that
+    replaces the roadmap must increment it.
+    """
+
+    version: int
+    note: str
+
+
+@dataclass(frozen=True, slots=True)
+class RoadmapInterface:
+    """One public interface declared by the architect.
+
+    `kind` is `"class"`, `"function"`, or `"constant"`. `module` is
+    the relative path where the interface is expected to live.
+    """
+
+    name: str
+    kind: str
+    module: str
+    signature: str
+    doc: str
+
+
+@dataclass(frozen=True, slots=True)
+class RoadmapStep:
+    """One implementation step in the roadmap.
+
+    `number` is unique and positive within a single roadmap version.
+    `depends_on` names earlier step numbers; cycles are rejected by
+    `roadmap.validate`.
+    """
+
+    number: int
+    title: str
+    goal: str
+    files: tuple[str, ...]
+    interfaces: tuple[str, ...]
+    acceptance: tuple[str, ...]
+    depends_on: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Roadmap:
+    """Parsed `.harness/roadmap.toml`.
+
+    Step numbers are local to this roadmap version. Replacing the
+    roadmap resets `state.roadmap_step` to zero.
+    """
+
+    meta: RoadmapMeta
+    interfaces: tuple[RoadmapInterface, ...]
+    steps: tuple[RoadmapStep, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LockEntry:
+    """One hashed file in a lock.
+
+    `path` is stored relative to the project root, using forward
+    slashes, so the lock is portable between machines and platforms.
+    """
+
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class Lock:
+    """Parsed `.harness/roadmap.lock`.
+
+    Records the freeze: which phase produced it, the git commit at
+    freeze time, the roadmap version, and the hashes of every file
+    that was frozen. All paths are relative to the project root.
+    """
+
+    at: str
+    phase: str
+    commit: str
+    version: int
+    roadmap_sha256: str
+    architecture: tuple[LockEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Report:
     """The report produced by `verify` and sent back to the AI.
 
-    `apply_log` is the text written by the preceding `apply` (the
-    list of files written). `notes` and `question` are user-fillable
-    placeholders; the harness never writes to them.
+    `apply_log` is the text written by the preceding `apply`. The
+    `deviations` and `roadmap_position` fields are populated only in
+    development phases with a frozen roadmap; otherwise they are
+    empty.
     """
 
     step_number: int
@@ -126,6 +206,8 @@ class Report:
     checks: tuple[CheckResult, ...]
     commit_hash: str | None
     commit_message: str | None
+    deviations: tuple[Deviation, ...]
+    roadmap_position: tuple[int, int] | None
     notes: str
     question: str
 
@@ -172,6 +254,8 @@ class Config:
     paths: dict[str, str]
     context: dict[str, Any]
     verify_commands: tuple[dict[str, Any], ...]
+    planning_commands: tuple[dict[str, Any], ...]
+    roadmap: dict[str, Any]
     bootstrap: dict[str, Any]
     tokenizer_path: Path
     tokenizer_url: str
@@ -183,33 +267,35 @@ class State:
     """Parsed `.harness/state.toml`.
 
     Written by the harness; read on every command that needs to know
-    the current phase or step. Timestamps are ISO-8601 strings.
+    the current phase, step, or roadmap position.
 
-    `last_commit` records the commit hash known at the last
-    lifecycle transition (`close`, `new-phase`, `rollback`). It is
-    not kept in sync with HEAD after every `verify` — the bootstrap
-    header reads HEAD directly from git for that. This field exists
-    so a state file on disk can answer "what was the last commit
-    when this session was closed".
+    `current_step` counts steps within the current phase, so it is
+    reset by `new-phase`. `roadmap_step` counts positions within the
+    active roadmap version and is reset by `close --freeze`.
 
-    `current_step` and `total_steps` *are* kept in sync: `verify`
-    updates them before its commit, so the bootstrap's Progress
-    section reflects the work actually done in the current phase.
+    `last_commit` records the commit hash known at the last lifecycle
+    transition (`close`, `new-phase`, `rollback`). It is not kept in
+    sync with HEAD after every `verify` — the bootstrap header reads
+    HEAD directly from git for that.
     """
 
     harness_version: str
     current_phase: str
+    phase_kind: str
     current_step: int
-    total_steps: int
     last_commit: str
     last_commit_date: str
+    roadmap_version: int
+    roadmap_step: int
+    roadmap_frozen: bool
+    rollback_count: int
     last_opened: str
     last_closed: str
 
 
 @dataclass(frozen=True, slots=True)
 class BootstrapResult:
-    """Output of `context.build()`.
+    """Output of `context.build_bootstrap()`.
 
     `breakdown` maps section name to token count. `truncated` is
     True when the harness dropped optional sections to fit
@@ -226,14 +312,19 @@ __all__ = [
     "BootstrapResult",
     "CheckResult",
     "Config",
+    "Deviation",
+    "DeviationType",
     "FileSpec",
+    "Lock",
+    "LockEntry",
     "ModuleInfo",
-    "Phase",
-    "PhaseStatus",
+    "PhaseKind",
     "ProcessResult",
     "Report",
+    "Roadmap",
+    "RoadmapInterface",
+    "RoadmapMeta",
+    "RoadmapStep",
     "State",
-    "Step",
-    "StepStatus",
     "SymbolInfo",
 ]

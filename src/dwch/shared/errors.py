@@ -33,7 +33,7 @@ class FormatError(HarnessError):
 
 
 class FilesystemError(HarnessError):
-    """A file operation failed: read, write, mkdir, unlink."""
+    """A file operation failed: read, write, mkdir, unlink, rename."""
 
 
 class ProcessError(HarnessError):
@@ -52,14 +52,29 @@ class TokenizerError(HarnessError):
     """The tokenizer file is missing or could not be loaded."""
 
 
+class RoadmapError(HarnessError):
+    """`.harness/roadmap.toml` is missing, malformed, or inconsistent."""
+
+
+class LockError(HarnessError):
+    """`.harness/roadmap.lock` is missing, malformed, or out of sync."""
+
+
+class DeviationError(HarnessError):
+    """A deviation file under `.harness/deviations/` is malformed."""
+
+
 __all__ = [
     "ClipboardError",
     "ConfigError",
+    "DeviationError",
     "FilesystemError",
     "FormatError",
     "GitError",
     "HarnessError",
+    "LockError",
     "ProcessError",
+    "RoadmapError",
     "StateError",
     "TokenizerError",
 ]

@@ -25,9 +25,9 @@ def build_module_map(
 ) -> list[ModuleInfo]:
     """Return interface summaries for every `.py` file under `root`.
 
-    Preconditions: `root` is a directory.
-    Postconditions: a list sorted by path. Empty when `root` has no
-    Python files, or when `root` does not exist.
+    Pre:  `root` is a directory.
+    Post: a list sorted by path. Empty when `root` has no Python
+          files, or when `root` does not exist.
 
     A file that fails to parse is skipped silently. Parse failures
     are a symptom of the module's state, not a harness error.
@@ -41,6 +41,25 @@ def build_module_map(
         if info is not None:
             result.append(info)
     return result
+
+
+def extract_public_symbols(fs: FilesystemPort, path: Path) -> set[str]:
+    """Return the set of public symbol names in one Python file.
+
+    Used by `verify_checks` to compare what the coder actually wrote
+    against the roadmap's declared interfaces. Returns an empty set
+    if the file cannot be read or parsed — the caller decides how to
+    report that.
+    """
+    try:
+        source = fs.read_text(path)
+    except FilesystemError:
+        return set()
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError:
+        return set()
+    return {sym.name for sym in _public_symbols(tree, include_private=False)}
 
 
 def render_module_map(modules: list[ModuleInfo], *, full: bool = False) -> str:
@@ -179,4 +198,4 @@ def _render_args(args: ast.arguments) -> str:
     return ", ".join(parts)
 
 
-__all__ = ["build_module_map", "render_module_map"]
+__all__ = ["build_module_map", "extract_public_symbols", "render_module_map"]

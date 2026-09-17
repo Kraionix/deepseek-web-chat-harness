@@ -25,12 +25,21 @@ _DEFAULT_PATHS = {
 _DEFAULT_CONTEXT = {
     "essential": ["AGENTS.md", "STATE.md"],
     "references": [],
+    "architecture": [],
     "map_root": "",
+}
+
+_DEFAULT_ROADMAP = {
+    "path": ".harness/roadmap.toml",
+    "lock_path": ".harness/roadmap.lock",
+    "deviations_path": ".harness/deviations",
+    "lock_required": False,
 }
 
 _DEFAULT_BOOTSTRAP = {
     "max_tokens": 10000,
     "recent_reports": 1,
+    "recent_deviations": 10,
     "include_module_map": True,
     "truncate": True,
 }
@@ -41,18 +50,17 @@ _DEFAULT_TOKENIZER_URL = (
 
 _DEFAULT_READ_MAX_TOKENS = 6000
 
-_HARNESS_VERSION = "0.1.0"
+_HARNESS_VERSION = "0.2.0"
 
 
 def load_config(fs: FilesystemPort, project_root: Path) -> Config:
     """Load and validate `.harness/config.toml`.
 
-    Preconditions: `project_root` is a directory.
-    Postconditions: a `Config` with every field populated. Missing
-    sections fall back to defaults.
-
-    Raises `ConfigError` when the file is missing, malformed, or
-    when `harness_version` is incompatible with this build.
+    Pre:  `project_root` is a directory.
+    Post: returns a `Config` with every field populated. Missing
+          sections fall back to defaults.
+    Raises: `ConfigError` when the file is missing, malformed, or
+          when `harness_version` is incompatible with this build.
     """
     config_path = project_root / ".harness" / "config.toml"
     if not fs.exists(config_path):
@@ -78,16 +86,19 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
 
     paths = {**_DEFAULT_PATHS, **data.get("paths", {})}
     context = {**_DEFAULT_CONTEXT, **data.get("context", {})}
+    roadmap = {**_DEFAULT_ROADMAP, **data.get("roadmap", {})}
     bootstrap = {**_DEFAULT_BOOTSTRAP, **data.get("bootstrap", {})}
     verify_commands = tuple(data.get("verify", {}).get("commands", []))
+    planning_commands = tuple(data.get("verify", {}).get("planning_commands", []))
+
+    _validate_relative_paths(context.get("architecture", []), "context.architecture")
 
     tokenizer = data.get("tokenizer", {})
     tokenizer_url = str(tokenizer.get("url", _DEFAULT_TOKENIZER_URL))
 
     # Tokenizer data lives under `.harness/data/` inside the project.
-    # The config may override the filename; it may not point outside
-    # the `.harness/` tree, and any override is silently clamped to
-    # the data directory.
+    # The config may override the filename; any override is resolved
+    # relative to the data directory.
     tokenizer_filename = str(tokenizer.get("filename", "deepseek_tokenizer.json"))
     tokenizer_path = project_root / ".harness" / "data" / tokenizer_filename
 
@@ -100,6 +111,8 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
         paths=paths,
         context=context,
         verify_commands=verify_commands,
+        planning_commands=planning_commands,
+        roadmap=roadmap,
         bootstrap=bootstrap,
         tokenizer_path=tokenizer_path,
         tokenizer_url=tokenizer_url,
@@ -131,8 +144,16 @@ phases = "phases"
 essential = ["AGENTS.md", "STATE.md"]
 # Files listed by name only; the AI asks for them on demand.
 references = ["docs/decisions.md"]
+# Frozen architecture documents included in every development bootstrap.
+architecture = ["docs/architecture.md"]
 # Root of the module interface map.
 map_root = "src"
+
+[roadmap]
+path = ".harness/roadmap.toml"
+lock_path = ".harness/roadmap.lock"
+deviations_path = ".harness/deviations"
+lock_required = false
 
 [verify]
 # Commands run by `dwch verify` in order. `required = false` means a
@@ -141,10 +162,13 @@ commands = [
     {{ name = "syntax", command = ["python", "-m", "compileall", "-q", "src"] }},
     {{ name = "lint", command = ["ruff", "check", "."] }},
 ]
+# Extra commands run only during a planning phase.
+planning_commands = []
 
 [bootstrap]
 max_tokens = {_DEFAULT_BOOTSTRAP["max_tokens"]}
 recent_reports = {_DEFAULT_BOOTSTRAP["recent_reports"]}
+recent_deviations = {_DEFAULT_BOOTSTRAP["recent_deviations"]}
 include_module_map = {str(_DEFAULT_BOOTSTRAP["include_module_map"]).lower()}
 truncate = {str(_DEFAULT_BOOTSTRAP["truncate"]).lower()}
 
@@ -155,6 +179,22 @@ url = "{_DEFAULT_TOKENIZER_URL}"
 [read]
 max_tokens = {_DEFAULT_READ_MAX_TOKENS}
 """
+
+
+def _validate_relative_paths(paths: list, label: str) -> None:
+    """Reject absolute paths and parent traversal in a config list.
+
+    Pre:  `paths` is a list of strings; `label` names the config key
+          for the error message.
+    Post: returns None on success.
+    Raises: `ConfigError` if any entry is not a relative path.
+    """
+    for entry in paths:
+        p = Path(str(entry))
+        if p.is_absolute():
+            raise ConfigError(f"{label}: absolute path not allowed: {entry!r}")
+        if ".." in p.parts:
+            raise ConfigError(f"{label}: parent traversal not allowed: {entry!r}")
 
 
 __all__ = ["config_to_toml", "load_config"]

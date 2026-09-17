@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..domain.models import CheckResult, FileSpec, Report
+from ..domain.models import CheckResult, Deviation, FileSpec, Report
 from ..shared.errors import FormatError
 
 FILE_OPEN = "<<<FILE:"
@@ -20,12 +20,11 @@ FILE_CLOSE = "<<<END>>>"
 def parse_step_message(text: str) -> list[FileSpec]:
     """Parse a step message into a list of `FileSpec`.
 
-    Preconditions: `text` is the raw content of the AI's message.
-    Postconditions: a list of `(path, content)` pairs, in the order
-    the blocks appeared.
-
-    Raises `FormatError` on an unclosed block, an empty path, or a
-    path that is not relative.
+    Pre:  `text` is the raw content of the AI's message.
+    Post: returns a list of `(path, content)` pairs, in the order
+          the blocks appeared.
+    Raises: `FormatError` on an unclosed block, an empty path, or no
+          blocks at all.
     """
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     specs: list[FileSpec] = []
@@ -124,6 +123,19 @@ def render_report(report: Report) -> str:
         lines.append("not committed")
     lines.append("")
 
+    if report.roadmap_position is not None:
+        before, after = report.roadmap_position
+        lines.append(f"roadmap position: {before} -> {after}")
+        lines.append("")
+
+    lines.append("deviations:")
+    if not report.deviations:
+        lines.append("(none)")
+    else:
+        for dev in report.deviations:
+            lines.append(summarize_deviation(dev))
+    lines.append("")
+
     lines.append("notes:")
     lines.append(report.notes or "(fill)")
     lines.append("")
@@ -145,6 +157,14 @@ def summarize_check(check: CheckResult) -> str:
     return f"{check.name}: {status}{suffix}"
 
 
+def summarize_deviation(dev: Deviation) -> str:
+    """One-line summary of a `Deviation` for the report body."""
+    affected = ", ".join(dev.affected) or "-"
+    flag = "auto" if dev.auto else "declared"
+    detail = f" — {dev.detail}" if dev.detail else ""
+    return f"- {dev.type.value} ({flag}): {affected} — {dev.reason}{detail}"
+
+
 __all__ = [
     "FILE_CLOSE",
     "FILE_OPEN",
@@ -152,5 +172,6 @@ __all__ = [
     "parse_step_message",
     "render_report",
     "summarize_check",
+    "summarize_deviation",
     "validate_paths",
 ]
