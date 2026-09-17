@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from typing import Any
 
 from ..domain.models import Config
 from ..shared.errors import ConfigError
@@ -91,8 +92,14 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
     context = {**_DEFAULT_CONTEXT, **data.get("context", {})}
     roadmap = {**_DEFAULT_ROADMAP, **data.get("roadmap", {})}
     bootstrap = {**_DEFAULT_BOOTSTRAP, **data.get("bootstrap", {})}
-    verify_commands = tuple(data.get("verify", {}).get("commands", []))
-    planning_commands = tuple(data.get("verify", {}).get("planning_commands", []))
+    verify_commands = _validate_commands(
+        data.get("verify", {}).get("commands", []),
+        "verify.commands",
+    )
+    planning_commands = _validate_commands(
+        data.get("verify", {}).get("planning_commands", []),
+        "verify.planning_commands",
+    )
 
     _validate_paths(config=paths, context=context, roadmap=roadmap)
 
@@ -183,40 +190,85 @@ max_tokens = {_DEFAULT_READ_MAX_TOKENS}
 """
 
 
+def _validate_commands(raw: object, label: str) -> tuple[dict[str, Any], ...]:
+    """Validate the shape of a `[[verify.*commands]]` array.
+
+    Pre:  `raw` is whatever TOML produced for the key; `label` names
+          it for error messages.
+    Post: a tuple of dicts, each with `command` guaranteed to be a
+          list of strings.
+    Raises: `ConfigError` if `raw` is not a list, an item is not a
+          table, or a `command` value is not a list of strings.
+    """
+    if not isinstance(raw, list):
+        raise ConfigError(
+            f"{label}: expected a list of tables, got {type(raw).__name__}"
+        )
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ConfigError(
+                f"{label}[{i}]: expected a table, got {type(item).__name__}"
+            )
+        command = item.get("command")
+        if not isinstance(command, list):
+            raise ConfigError(
+                f"{label}[{i}].command: expected a list of strings, "
+                f"got {type(command).__name__}"
+            )
+        for j, arg in enumerate(command):
+            if not isinstance(arg, str):
+                raise ConfigError(
+                    f"{label}[{i}].command[{j}]: expected a string, "
+                    f"got {type(arg).__name__}"
+                )
+        out.append(dict(item))
+    return tuple(out)
+
+
 def _validate_paths(*, config: dict, context: dict, roadmap: dict) -> None:
     """Reject absolute paths and parent traversal in every path field.
 
     Pre:  `config`, `context`, `roadmap` are the merged dicts from
           `load_config`.
     Post: returns None on success.
-    Raises: `ConfigError` if any path-typed value is not relative.
+    Raises: `ConfigError` if any path-typed value is not relative, or
+          if a list-typed field is not a list.
     """
     for key, value in config.items():
         _validate_relative_path(value, f"paths.{key}")
 
     for key in ("essential", "references", "architecture"):
-        for entry in context.get(key, []):
-            _validate_relative_path(str(entry), f"context.{key}")
+        entries = context.get(key, [])
+        if not isinstance(entries, list):
+            raise ConfigError(
+                f"context.{key}: expected a list, got {type(entries).__name__}"
+            )
+        for entry in entries:
+            _validate_relative_path(entry, f"context.{key}")
 
     # `map_root` may be empty: an empty value means "no map". Only
     # a non-empty value is validated.
     map_root = context.get("map_root", "")
     if map_root:
-        _validate_relative_path(str(map_root), "context.map_root")
+        _validate_relative_path(map_root, "context.map_root")
 
     for key in ("path", "lock_path", "deviations_path"):
         value = roadmap.get(key, "")
         if value:
-            _validate_relative_path(str(value), f"roadmap.{key}")
+            _validate_relative_path(value, f"roadmap.{key}")
 
 
-def _validate_relative_path(value: str, label: str) -> None:
+def _validate_relative_path(value: object, label: str) -> None:
     """Reject an absolute path or a path containing `..`.
 
-    Pre:  `value` is a string; `label` names the config key.
+    Pre:  `value` is any TOML value; `label` names the config key.
     Post: returns None on success.
-    Raises: `ConfigError` if the path is not a safe relative path.
+    Raises: `ConfigError` if `value` is not a string, or if it names
+          a path that is not a safe relative path.
     """
+    if not isinstance(value, str):
+        raise ConfigError(f"{label}: expected a string, got {type(value).__name__}")
     p = Path(value)
     if p.is_absolute():
         raise ConfigError(f"{label}: absolute path not allowed: {value!r}")

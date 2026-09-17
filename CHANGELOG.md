@@ -3,6 +3,58 @@
 Follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-09-17
+
+### Fixed
+
+- `config._validate_relative_path` raises `ConfigError` instead of
+  `TypeError` on a non-string value (e.g. `paths.steps = 5`).
+- `config` validates the shape of `verify.commands` and
+  `verify.planning_commands`: each entry must be a table with
+  `command` as a list of strings. A string command such as
+  `command = "ruff check"` is rejected at load time instead of
+  being silently split into characters by `tuple(...)`.
+- `verify` no longer silently drops a malformed roadmap. It warns
+  on stderr, symmetric with `bootstrap`, and continues without the
+  roadmap checks.
+- `verify` refuses to run past the end of a frozen roadmap.
+  `check_roadmap_step` now takes the roadmap and reports a missing
+  expected step instead of skipping `roadmap-files` and
+  `roadmap-interfaces` silently.
+- `verify` converts a non-integer step argument into exit code 2
+  with a message, instead of raising `ValueError` with a traceback.
+- `apply` does the same for its step argument. Previously
+  `dwch apply abc` created `step-abc.txt`.
+- `verify._planning_checks` compares roadmap paths as
+  `PurePosixPath` on both sides, so `.harness//roadmap.toml` is
+  recognized as the same file as `.harness/roadmap.toml`.
+- `health` no longer crashes on a malformed `.harness/roadmap.lock`;
+  the failure is reported as a failed `roadmap` line.
+- `map._walk` reads directory entries through the filesystem port
+  instead of calling `Path.is_dir()` / `Path.is_file()` directly.
+- `parse_step_message` rejects duplicate paths with `FormatError`.
+- `roadmap.validate` reports duplicate interface names.
+
+### Changed
+
+- Three unused predicates are removed from `rules.py`:
+  `can_verify_step`, `is_step_number_valid`, `roadmap_step_valid`.
+  `is_roadmap_frozen` is kept and now used by `new-phase` and
+  `verify` instead of reading `state.roadmap_frozen` directly.
+
+### Internal
+
+- `detect_marker_collision`'s docstring now states that a literal
+  `<<<FILE:...>>>` inside content is safe: the parser tracks block
+  state, so only a bare `<<<END>>>` line collides.
+- `config._validate_commands` is a new helper that normalizes and
+  validates the shape of `verify.commands` and
+  `verify.planning_commands` in one place.
+- `verify._load_roadmap_or_none` is a new helper that centralizes
+  the warn-and-continue behaviour.
+- `README.md` no longer refers to 0.2.0 as the version that
+  introduced roadmap-driven development.
+
 ## [0.2.1] - 2026-09-17
 
 ### Fixed

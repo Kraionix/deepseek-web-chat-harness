@@ -59,12 +59,16 @@ def _tree(deps: Deps, root: Path) -> str:
 
 
 def _walk(deps: Deps, path: Path, lines: list[str], prefix: str) -> None:
-    entries = sorted(deps.fs.listdir(path), key=lambda p: (p.is_file(), p.name))
+    entries = sorted(
+        deps.fs.listdir(path),
+        key=lambda p: (deps.fs.is_file(p), p.name),
+    )
     for i, entry in enumerate(entries):
         last = i == len(entries) - 1
         marker = "`-- " if last else "|-- "
-        lines.append(f"{prefix}{marker}{entry.name}{'/' if entry.is_dir() else ''}")
-        if entry.is_dir() and not entry.name.startswith("."):
+        suffix = "/" if deps.fs.is_dir(entry) else ""
+        lines.append(f"{prefix}{marker}{entry.name}{suffix}")
+        if deps.fs.is_dir(entry) and not entry.name.startswith("."):
             _walk(deps, entry, lines, prefix + ("    " if last else "|   "))
 
 

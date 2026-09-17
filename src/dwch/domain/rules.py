@@ -11,7 +11,6 @@ from .models import (
     DeviationType,
     FileSpec,
     PhaseKind,
-    Roadmap,
     State,
 )
 
@@ -22,15 +21,6 @@ _VALID_PHASE_KINDS = frozenset(
         PhaseKind.UNSET.value,
     }
 )
-
-
-def is_step_number_valid(n: int) -> bool:
-    """True when `n` is a positive integer suitable for a step number.
-
-    Step numbers are 1-based. A step number of 0 or negative is
-    always a mistake.
-    """
-    return n >= 1
 
 
 def is_planning_phase(state: State) -> bool:
@@ -62,18 +52,12 @@ def is_unset_phase(state: State) -> bool:
 
 
 def is_roadmap_frozen(state: State) -> bool:
-    """True when the active roadmap has been frozen by `close --freeze`."""
-    return state.roadmap_frozen
+    """True when the active roadmap has been frozen by `close --freeze`.
 
-
-def can_verify_step(state: State, target: int) -> bool:
-    """True when `target` is the next step in the current phase.
-
-    Steps are sequential within a phase. Verifying a step that is
-    not the immediate successor of the last verified one is a
-    protocol error, not a format error.
+    A frozen roadmap has a lock file and drives the roadmap checks
+    in `verify`. An unfrozen one does not.
     """
-    return target == state.current_step + 1
+    return state.roadmap_frozen
 
 
 def is_substantive(specs: list[FileSpec]) -> bool:
@@ -92,17 +76,6 @@ def is_substantive(specs: list[FileSpec]) -> bool:
 def has_blocker(deviations: list[Deviation]) -> bool:
     """True when any deviation has type `BLOCKER`."""
     return any(d.type == DeviationType.BLOCKER for d in deviations)
-
-
-def roadmap_step_valid(roadmap: Roadmap, step: int) -> bool:
-    """True when `step` names an existing step in `roadmap`.
-
-    `step` is 1-based; step 0 means "not started yet" and is always
-    invalid here.
-    """
-    if step < 1:
-        return False
-    return any(s.number == step for s in roadmap.steps)
 
 
 def is_state_consistent(state: State) -> bool:
@@ -124,14 +97,11 @@ def is_state_consistent(state: State) -> bool:
 
 
 __all__ = [
-    "can_verify_step",
     "has_blocker",
     "is_development_phase",
     "is_planning_phase",
     "is_roadmap_frozen",
     "is_state_consistent",
-    "is_step_number_valid",
     "is_substantive",
     "is_unset_phase",
-    "roadmap_step_valid",
 ]

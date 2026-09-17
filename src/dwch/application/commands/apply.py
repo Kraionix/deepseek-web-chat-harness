@@ -31,6 +31,15 @@ from ..state import load_state
 def cmd_apply(args: Namespace, deps: Deps) -> int:
     """Apply a step. Returns 0 on success, 1 on parse error, 2 on I/O."""
     try:
+        int(args.step)
+    except (TypeError, ValueError):
+        print(
+            f"error: step must be an integer, got {args.step!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
         config = load_config(deps.fs, deps.project_root)
         state = load_state(deps.fs, deps.project_root)
     except HarnessError as exc:

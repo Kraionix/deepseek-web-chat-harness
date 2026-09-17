@@ -26,8 +26,9 @@ from __future__ import annotations
 import sys
 from argparse import Namespace
 from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
 
-from ...domain.models import CheckResult, Deviation, FileSpec, Report
+from ...domain.models import CheckResult, Deviation, FileSpec, Report, Roadmap
 from ...domain.rules import has_blocker, is_substantive
 from ...shared.errors import FormatError, HarnessError
 from .. import deviations as dev_mod
@@ -40,7 +41,12 @@ from ..format import (
     render_report,
     summarize_check,
 )
-from ..rules import is_development_phase, is_planning_phase, is_unset_phase
+from ..rules import (
+    is_development_phase,
+    is_planning_phase,
+    is_roadmap_frozen,
+    is_unset_phase,
+)
 from ..state import load_state, save_state, with_updates
 from ..verify_checks import (
     check_architecture_lock,
@@ -55,6 +61,15 @@ from ..verify_checks import (
 
 def cmd_verify(args: Namespace, deps: Deps) -> int:
     """Verify a step. Returns 0 on success, 1 on check failure, 2 on error."""
+    try:
+        step_num = int(args.step)
+    except (TypeError, ValueError):
+        print(
+            f"error: step must be an integer, got {args.step!r}",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         config = load_config(deps.fs, deps.project_root)
         state = load_state(deps.fs, deps.project_root)
@@ -110,12 +125,7 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
     roadmap_path = deps.project_root / config.roadmap.get(
         "path", ".harness/roadmap.toml"
     )
-    roadmap = None
-    if deps.fs.exists(roadmap_path):
-        try:
-            roadmap = roadmap_mod.load(deps.fs, roadmap_path)
-        except HarnessError:
-            roadmap = None
+    roadmap = _load_roadmap_or_none(deps, roadmap_path)
 
     is_planning = is_planning_phase(state)
     is_development = is_development_phase(state)
@@ -128,7 +138,9 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
     if is_planning:
         checks.extend(_planning_checks(specs, deps, config, roadmap))
     elif is_development:
-        checks.extend(_development_checks(args, deps, config, state, roadmap, specs))
+        checks.extend(
+            _development_checks(step_num, deps, config, state, roadmap, specs)
+        )
     else:
         print(
             "error: no phase is active. Run `dwch new-phase NAME --kind ...` first.",
@@ -144,12 +156,12 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
     # Declared deviations are read before auto-detection: a blocker
     # is a deliberate "I cannot do this", and auto-flagging the
     # missing files on top of it would only add noise.
-    declared = dev_mod.load_step(deps.fs, dev_dir, int(args.step))
+    declared = dev_mod.load_step(deps.fs, dev_dir, step_num)
 
     auto_devs: list[Deviation] = []
     if (
         is_development
-        and state.roadmap_frozen
+        and is_roadmap_frozen(state)
         and roadmap is not None
         and not has_blocker(declared)
     ):
@@ -165,17 +177,17 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
     if all_required_ok:
         commit_message = f"step {args.step}: applied and verified"
         if auto_devs:
-            dev_mod.write_auto(deps.fs, dev_dir, int(args.step), auto_devs)
+            dev_mod.write_auto(deps.fs, dev_dir, step_num, auto_devs)
         now = datetime.now(UTC).isoformat(timespec="seconds")
         advance_roadmap = (
             is_development
-            and state.roadmap_frozen
+            and is_roadmap_frozen(state)
             and roadmap is not None
             and is_substantive(specs)
         )
         updated = with_updates(
             state,
-            current_step=int(args.step),
+            current_step=step_num,
             last_commit_date=now,
             roadmap_step=state.roadmap_step + (1 if advance_roadmap else 0),
         )
@@ -194,7 +206,7 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
 
     all_devs = tuple(declared) + tuple(auto_devs)
     report = Report(
-        step_number=int(args.step),
+        step_number=step_num,
         apply_log=apply_log,
         checks=tuple(checks),
         commit_hash=commit_hash,
@@ -216,6 +228,26 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
             print("warning: clipboard unavailable", file=sys.stderr)
 
     return 0 if all_required_ok else 1
+
+
+def _load_roadmap_or_none(deps: Deps, path: Path) -> Roadmap | None:
+    """Load the roadmap if present; warn on stderr and return None.
+
+    Mirrors the bootstrap behaviour. A roadmap that exists but
+    cannot be parsed is a real problem for the session: the roadmap
+    checks would be skipped silently, and the coder might not
+    notice. Warning on stderr surfaces the problem without changing
+    the exit code, because a phase may legitimately be running
+    without a roadmap (e.g. a development phase started before
+    freezing).
+    """
+    if not deps.fs.exists(path):
+        return None
+    try:
+        return roadmap_mod.load(deps.fs, path)
+    except HarnessError as exc:
+        print(f"warning: could not load roadmap: {exc}", file=sys.stderr)
+        return None
 
 
 def _parse_step_or_none(text: str) -> list[FileSpec] | None:
@@ -241,14 +273,18 @@ def _planning_checks(
 
     A roadmap written by the architect is validated structurally so
     that a malformed file cannot be frozen. The roadmap path is
-    resolved from config, not hard-coded.
+    resolved from config, not hard-coded. Paths are compared as
+    `PurePosixPath` on both sides so that `.harness//roadmap.toml`
+    and `.harness/roadmap.toml` compare equal.
     """
     out: list[CheckResult] = []
 
-    roadmap_rel = str(config.roadmap.get("path", ".harness/roadmap.toml")).replace(
-        "\\", "/"
+    roadmap_rel = PurePosixPath(
+        str(config.roadmap.get("path", ".harness/roadmap.toml")).replace("\\", "/")
     )
-    wrote_roadmap = any(s.path.replace("\\", "/") == roadmap_rel for s in specs)
+    wrote_roadmap = any(
+        PurePosixPath(s.path.replace("\\", "/")) == roadmap_rel for s in specs
+    )
     if wrote_roadmap:
         if roadmap is None:
             out.append(
@@ -279,7 +315,7 @@ def _planning_checks(
 
 
 def _development_checks(
-    args: Namespace,
+    step_num: int,
     deps: Deps,
     config,
     state,
@@ -289,8 +325,8 @@ def _development_checks(
     """Checks that run only in a development phase."""
     out: list[CheckResult] = [check_compile(specs, deps)]
 
-    if state.roadmap_frozen and roadmap is not None:
-        out.append(check_roadmap_step(int(args.step), state))
+    if is_roadmap_frozen(state) and roadmap is not None:
+        out.append(check_roadmap_step(step_num, state, roadmap))
         current = roadmap_mod.find_step(roadmap, state.roadmap_step + 1)
         if current is not None:
             out.append(check_roadmap_files(specs, current))

@@ -11,9 +11,10 @@ the result, commit, read a file on demand, roll back, start a new phase,
 close the session. It also counts tokens precisely (using DeepSeek's
 real BPE tokenizer) so the model knows whether a bootstrap fits.
 
-Version 0.2.0 adds **roadmap-driven development**: a planning session
-produces a machine-readable roadmap, `close --freeze` locks it, and a
-development session executes it step by step, recording every deviation.
+The harness supports **roadmap-driven development**: a planning
+session produces a machine-readable roadmap, `close --freeze` locks
+it, and a development session executes it step by step, recording
+every deviation.
 
 ## Requirements
 

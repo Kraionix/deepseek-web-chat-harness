@@ -146,6 +146,10 @@ def _check_roadmap(deps: Deps) -> tuple[str, bool, str, bool]:
     The check is informational: a missing roadmap is OK, and a
     changed architecture document is reported but does not fail
     health. Its `critical` flag is always False.
+
+    A malformed lock is reported as a failure rather than raising:
+    `health` is the place a user looks when something is wrong, and
+    it must never crash on a broken file.
     """
     try:
         config = load_config(deps.fs, deps.project_root)
@@ -166,7 +170,10 @@ def _check_roadmap(deps: Deps) -> tuple[str, bool, str, bool]:
     lock_path = deps.project_root / config.roadmap.get(
         "lock_path", ".harness/roadmap.lock"
     )
-    lock = lock_mod.load(deps.fs, lock_path)
+    try:
+        lock = lock_mod.load(deps.fs, lock_path)
+    except HarnessError as exc:
+        return ("roadmap", False, f"invalid lock: {exc}", False)
     if lock is None:
         detail = f"v{roadmap.meta.version} not frozen"
         return ("roadmap", True, detail, False)

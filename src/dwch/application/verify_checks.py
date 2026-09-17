@@ -23,6 +23,7 @@ from ..domain.models import (
 from ..shared.errors import HarnessError
 from . import lock as lock_mod
 from . import module_map
+from . import roadmap as roadmap_mod
 from .deps import Deps
 from .ports import FilesystemPort
 
@@ -73,14 +74,36 @@ def check_compile(specs: list[FileSpec], deps: Deps) -> CheckResult:
     )
 
 
-def check_roadmap_step(args_step: int, state: State) -> CheckResult:
+def check_roadmap_step(
+    args_step: int,
+    state: State,
+    roadmap: Roadmap,
+) -> CheckResult:
     """Verify that `args_step` is the next roadmap position.
 
     `roadmap_step` counts completed steps, so the expected step is
     `roadmap_step + 1`. A mismatch means the coder skipped or
     repeated a step.
+
+    A development phase that runs past the end of its roadmap is a
+    protocol error: the expected step does not exist. This is
+    reported as a failure rather than silently skipping the
+    roadmap-files and roadmap-interfaces checks.
     """
     expected = state.roadmap_step + 1
+    if roadmap_mod.find_step(roadmap, expected) is None:
+        return CheckResult(
+            name="roadmap-step",
+            command=("roadmap-step",),
+            exit_code=1,
+            stdout=(
+                f"roadmap step {expected} does not exist; "
+                f"roadmap v{roadmap.meta.version} has "
+                f"{len(roadmap.steps)} step(s)"
+            ),
+            stderr="",
+            required=True,
+        )
     ok = args_step == expected
     return CheckResult(
         name="roadmap-step",
@@ -211,6 +234,8 @@ def run_configured(specs: list[dict], deps: Deps) -> list[CheckResult]:
     """Run every configured command and return the results.
 
     Pre:  `specs` is a list of `{name, command, required}` dicts.
+          `config.load_config` guarantees `command` is a non-empty
+          list of strings when the key is present.
     Post: one `CheckResult` per spec, in order. A spec with an empty
           command yields `exit_code=1` with an explanatory `stderr`.
     """

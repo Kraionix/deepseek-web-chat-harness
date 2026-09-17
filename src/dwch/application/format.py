@@ -3,7 +3,8 @@
 The step format is fixed and minimal: blocks delimited by
 `<<<FILE:path>>>` and `<<<END>>>`. Everything outside a block is
 ignored. There is no escaping and no nesting; the parser is a
-single forward scan.
+single forward scan that tracks whether it is inside a block, so a
+literal `<<<FILE:...>>>` line inside content is not a marker.
 """
 
 from __future__ import annotations
@@ -22,12 +23,13 @@ def parse_step_message(text: str) -> list[FileSpec]:
 
     Pre:  `text` is the raw content of the AI's message.
     Post: returns a list of `(path, content)` pairs, in the order
-          the blocks appeared.
-    Raises: `FormatError` on an unclosed block, an empty path, or no
-          blocks at all.
+          the blocks appeared. Paths are unique.
+    Raises: `FormatError` on an unclosed block, an empty path, a
+          duplicate path, or no blocks at all.
     """
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     specs: list[FileSpec] = []
+    seen: set[str] = set()
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -35,6 +37,9 @@ def parse_step_message(text: str) -> list[FileSpec]:
             path = line[len(FILE_OPEN) : -3].strip()
             if not path:
                 raise FormatError(f"empty path at line {i + 1}")
+            if path in seen:
+                raise FormatError(f"duplicate path {path!r} at line {i + 1}")
+            seen.add(path)
             i += 1
             buf: list[str] = []
             while i < len(lines) and lines[i] != FILE_CLOSE:
@@ -76,6 +81,10 @@ def detect_marker_collision(spec: FileSpec) -> None:
     would be interpreted as the closing marker on a subsequent
     re-parse. The parser cannot distinguish the two. Refusing the
     step is safer than writing a file that breaks future tooling.
+
+    A literal `<<<FILE:...>>>` line inside content is *not* a
+    problem: the parser tracks whether it is inside a block, so an
+    opening marker only counts when it appears outside one.
     """
     for line in spec.content.split("\n"):
         if line == FILE_CLOSE:

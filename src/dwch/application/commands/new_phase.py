@@ -32,6 +32,7 @@ from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..handoff import update_metadata
+from ..rules import is_roadmap_frozen
 from ..state import load_state, save_state, with_updates
 
 # Characters that are unsafe in a directory name on any of the
@@ -65,7 +66,7 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
     kind = args.kind
     state = load_state(deps.fs, deps.project_root)
 
-    if kind == "planning" and state.roadmap_frozen:
+    if kind == "planning" and is_roadmap_frozen(state):
         print(
             "warning: a new roadmap version will replace the current frozen one",
             file=sys.stderr,
@@ -81,7 +82,7 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if kind == "development" and start_step == 0 and not state.roadmap_frozen:
+    if kind == "development" and start_step == 0 and not is_roadmap_frozen(state):
         print(
             "warning: starting a development phase with no frozen roadmap; "
             "roadmap checks will be skipped",
@@ -136,7 +137,7 @@ def _resolve_start_step(deps: Deps, config, state, kind: str) -> int:
     """
     if kind != "development":
         return 0
-    if not state.roadmap_frozen:
+    if not is_roadmap_frozen(state):
         return 0
 
     roadmap_path = deps.project_root / config.roadmap.get(

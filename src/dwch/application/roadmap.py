@@ -80,7 +80,11 @@ def validate(roadmap: Roadmap) -> list[str]:
             f"step numbers must be 1..{len(numbers)}, got {sorted(numbers)}"
         )
 
-    interface_names = {i.name for i in roadmap.interfaces}
+    iface_names = [i.name for i in roadmap.interfaces]
+    if len(iface_names) != len(set(iface_names)):
+        problems.append("interface names are not unique")
+
+    interface_names = set(iface_names)
     for step in roadmap.steps:
         for name in step.interfaces:
             if name not in interface_names:
