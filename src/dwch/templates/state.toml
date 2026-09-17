@@ -1,0 +1,15 @@
+[harness]
+version = "0.1.0"
+
+[phase]
+current = "unset"
+
+[step]
+current = 0
+total = 0
+last_commit = ""
+last_commit_date = ""
+
+[session]
+last_opened = ""
+last_closed = ""

@@ -1,0 +1,41 @@
+# dwch configuration. Edit by hand as needed.
+# `dwch` only reads this file; it does not rewrite it.
+
+[harness]
+version = "0.1.0"
+
+[project]
+name = "unnamed"
+
+[paths]
+steps = "steps"
+phases = "phases"
+
+[context]
+# Files copied verbatim into the bootstrap.
+essential = ["AGENTS.md", "STATE.md"]
+# Files listed by name only; the AI asks for them on demand.
+references = ["docs/decisions.md"]
+# Root of the module interface map.
+map_root = "src"
+
+[verify]
+# Commands run by `dwch verify` in order. `required = false` means a
+# non-zero exit is recorded but does not block the commit.
+commands = [
+    { name = "syntax", command = ["python", "-m", "compileall", "-q", "src"] },
+    { name = "lint", command = ["ruff", "check", "."] },
+]
+
+[bootstrap]
+max_tokens = 10000
+recent_reports = 1
+include_module_map = true
+truncate = true
+
+[tokenizer]
+# Downloaded by `dwch init` into .harness/data/.
+url = "https://huggingface.co/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer.json"
+
+[read]
+max_tokens = 6000
