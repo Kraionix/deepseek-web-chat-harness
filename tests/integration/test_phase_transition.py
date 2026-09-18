@@ -1,11 +1,9 @@
 """End-to-end test of the two-phase transition flow.
 
-The 0.3.0 model: each phase runs in its own chat, and the phase
-summary at `.harness/summaries/{phase}.md` is the only cross-phase
-context the next session sees. This test runs two full cycles and
-checks that the second phase's bootstrap contains the first
-phase's summary, and the third phase's bootstrap contains the
-second phase's summary.
+The single test here runs three phases in sequence and is the
+slowest in the suite. It is marked `slow` so a fast iteration can
+skip it; run it before any commit that touches `close`,
+`new-phase`, or the summary model.
 """
 
 from __future__ import annotations
@@ -13,12 +11,16 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 from dwch.application.commands.apply import cmd_apply
 from dwch.application.commands.bootstrap import cmd_bootstrap
 from dwch.application.commands.close import cmd_close
 from dwch.application.commands.new_phase import cmd_new_phase
 from dwch.application.commands.verify import cmd_verify
 from dwch.application.state import load_state
+
+pytestmark = pytest.mark.slow
 
 _ROADMAP = """\
 [meta]

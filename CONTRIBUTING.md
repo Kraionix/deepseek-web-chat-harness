@@ -10,9 +10,9 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
-`[dev]` adds `ruff`, `pytest`, and `pytest-cov`. No other setup is
-needed: the test suite uses a real filesystem and a real `git` in
-temporary directories, and never hits the network.
+`[dev]` adds `ruff`, `pytest`, `pytest-cov`, and `pytest-xdist`. No
+other setup is needed: the test suite uses a real filesystem and a
+real `git` in temporary directories, and never hits the network.
 
 ## Checks
 
@@ -22,7 +22,35 @@ ruff format --check .
 pytest -q
 ```
 
-All three must pass. CI runs the same on Python 3.11 and 3.12.
+All three must pass. CI runs the same on Python 3.11 and 3.12, with
+`pytest -n 4`.
+
+## Test speed
+
+The suite parallelizes through `pytest-xdist`. `-n 4` matches the
+CI job; on a laptop it is a safe default, and on a machine with
+more cores `-n auto` usually helps but is likelier to hit disk I/O
+contention on Windows. The default `addopts` do not enable
+parallelism: a bare `pytest` should behave the same everywhere.
+
+End-to-end tests are marked `slow`. They exercise a full phase
+transition and are the only place a lifecycle regression shows up;
+run them before a commit. While iterating on a single module, skip
+them:
+
+```powershell
+pytest -m "not slow"
+```
+
+The marker is registered in `pyproject.toml`; `--strict-markers` is
+on, so an unregistered marker fails collection.
+
+Setup cost is dominated by git. `tests/conftest.py` builds one
+repository per session and copies it into every test's `tmp_path`,
+and sets `GIT_AUTHOR_*` / `GIT_COMMITTER_*` in the environment so
+no test pays for a `git config` call. Do not reintroduce
+`git init` or `git config user.*` in a fixture: it costs roughly
+125 ms per test on Windows.
 
 ## Coverage
 

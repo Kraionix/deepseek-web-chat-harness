@@ -23,4 +23,4 @@ jobs:
       - name: Format check
         run: ruff format --check .
       - name: Test
-        run: pytest -q
+        run: pytest -n 4 -q

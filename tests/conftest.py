@@ -5,16 +5,27 @@ The strategy comes from the 0.2.1 handoff: use real adapters on
 are cheap enough to fake (clipboard, process, tokenizer); the
 filesystem and git ports go through their real adapters.
 
-`project_root` gives every test a real git repository with a first
-commit. `harness_root` extends it with `.harness/config.toml` and a
-fresh state. `deps` wraps a `project_root` in a `Deps` with the
-three fakes wired in. `broken_deps` is `deps` with a git port whose
-`commit_all` always raises: used by tests that assert a lifecycle
-command restores state when the commit fails.
+Speed comes from three choices, all introduced in 0.3.2:
+
+- Git identity is set through environment variables at conftest
+  import time, so no test pays for `git config user.email`.
+- A session-scoped template repository is created once and
+  `copytree`-d into each test's `tmp_path`, replacing the six
+  subprocesses (`init`, three `config`, `add`, `commit`) that used
+  to run per test.
+- `core.autocrlf=false` is applied through `GIT_CONFIG_*` rather
+  than written to each repository.
+
+`broken_deps` is `deps` with a git port whose `commit_all` always
+raises: used by tests that assert a lifecycle command restores
+state when the commit fails.
 """
 
 from __future__ import annotations
 
+import contextlib
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -31,6 +42,41 @@ from tests.fakes import (
     InMemoryCounter,
     InMemoryProcess,
 )
+
+
+def _append_git_config(key: str, value: str) -> None:
+    """Add one `git -c` style setting to the inherited environment.
+
+    `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_<n>` + `GIT_CONFIG_VALUE_<n>`
+    is the mechanism git 2.31 and later use to read config from the
+    environment. Appending rather than overwriting respects any
+    `GIT_CONFIG_*` the user already exported.
+    """
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    os.environ["GIT_CONFIG_COUNT"] = str(count + 1)
+    os.environ[f"GIT_CONFIG_KEY_{count}"] = key
+    os.environ[f"GIT_CONFIG_VALUE_{count}"] = value
+
+
+def _configure_git_env() -> None:
+    """Configure git for the whole test session via environment.
+
+    Runs once, at conftest import. Every `subprocess.run(["git", ...])`
+    the tests spawn inherits these, so no test calls `git config`.
+    `setdefault` leaves a user's own identity alone when they run the
+    suite locally.
+    """
+    os.environ.setdefault("GIT_AUTHOR_NAME", "Test")
+    os.environ.setdefault("GIT_AUTHOR_EMAIL", "test@example.com")
+    os.environ.setdefault("GIT_COMMITTER_NAME", "Test")
+    os.environ.setdefault("GIT_COMMITTER_EMAIL", "test@example.com")
+    # Line endings must be stable across hosts: the suite compares
+    # file contents and hashes.
+    _append_git_config("core.autocrlf", "false")
+
+
+_configure_git_env()
+
 
 # Minimal config that `load_config` accepts. `verify.commands` and
 # `verify.planning_commands` are empty so tests never shell out to
@@ -84,7 +130,8 @@ def _run_git(cwd: Path, *args: str) -> None:
 
     `capture_output=True` keeps the git chatter out of the test's
     stdout; a failure still surfaces with the command's stderr in
-    the traceback.
+    the traceback. Identity and `core.autocrlf` come from the
+    environment, not from the repository.
     """
     subprocess.run(
         ["git", *args],
@@ -94,21 +141,52 @@ def _run_git(cwd: Path, *args: str) -> None:
     )
 
 
+@pytest.fixture(scope="session")
+def _git_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A git repository with one commit, built once per session.
+
+    `project_root` copies this directory into each test's
+    `tmp_path`. Four subprocesses per session replace six per test;
+    the per-test cost drops to a `shutil.copytree`.
+    """
+    root = tmp_path_factory.mktemp("git-template")
+    _run_git(root, "init", "-q")
+    (root / "README.md").write_text("# project\n", encoding="utf-8")
+    _run_git(root, "add", "-A")
+    _run_git(root, "commit", "-q", "-m", "init")
+    return root
+
+
+def _make_writable(root: Path) -> None:
+    """Clear read-only bits left by `copytree`.
+
+    Git creates loose objects as read-only on POSIX. On Windows,
+    `shutil.copytree` preserves that bit, and a later `git add` or
+    `git reset` may refuse to touch the copy. Clearing the bit is
+    cheap and keeps the tests portable.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames:
+            with contextlib.suppress(OSError):
+                os.chmod(os.path.join(dirpath, name), 0o755)
+        for name in filenames:
+            with contextlib.suppress(OSError):
+                os.chmod(os.path.join(dirpath, name), 0o644)
+
+
 @pytest.fixture
-def project_root(tmp_path: Path) -> Path:
+def project_root(tmp_path: Path, _git_template: Path) -> Path:
     """A real git repository with a first commit.
 
-    `core.autocrlf=false` keeps line endings stable across hosts,
-    which matters for tests that compare file contents or hashes.
+    Copies the session-scoped template into `tmp_path / "repo"`.
+    The subdirectory keeps the path short on Windows and leaves
+    `tmp_path` free for tests that want to create sibling
+    directories (`test_health` does).
     """
-    _run_git(tmp_path, "init", "-q")
-    _run_git(tmp_path, "config", "user.email", "test@example.com")
-    _run_git(tmp_path, "config", "user.name", "Test")
-    _run_git(tmp_path, "config", "core.autocrlf", "false")
-    (tmp_path / "README.md").write_text("# project\n", encoding="utf-8")
-    _run_git(tmp_path, "add", "-A")
-    _run_git(tmp_path, "commit", "-q", "-m", "init")
-    return tmp_path
+    dest = tmp_path / "repo"
+    shutil.copytree(_git_template, dest)
+    _make_writable(dest)
+    return dest
 
 
 @pytest.fixture

@@ -1,9 +1,16 @@
-"""Tests for `application.commands.new_phase`."""
+"""Tests for `application.commands.new_phase`.
+
+Six of the eleven tests call `cmd_new_phase` on the happy path,
+which commits the tree. Those six are marked `slow`. The five
+rejection tests fail before any git work and stay in the fast set.
+"""
 
 from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+
+import pytest
 
 from dwch.application.commands.apply import cmd_apply
 from dwch.application.commands.close import cmd_close
@@ -24,6 +31,7 @@ def _apply_summary(deps, phase: str) -> None:
     assert cmd_apply(Namespace(step="summary", from_file=None), deps) == 0
 
 
+@pytest.mark.slow
 def test_new_planning_phase(harness_root: Path, deps) -> None:
     """A planning phase resets `current_step` to zero."""
     assert cmd_new_phase(_args("planning-01", "planning"), deps) == 0
@@ -33,6 +41,7 @@ def test_new_planning_phase(harness_root: Path, deps) -> None:
     assert state.current_step == 0
 
 
+@pytest.mark.slow
 def test_new_development_no_roadmap(harness_root: Path, deps, capsys) -> None:
     """A development phase without a frozen roadmap starts at 0 and warns."""
     assert cmd_new_phase(_args("dev-01", "development"), deps) == 0
@@ -77,6 +86,7 @@ def test_new_phase_rejects_nul(harness_root: Path, deps, capsys) -> None:
     assert "control" in err
 
 
+@pytest.mark.slow
 def test_new_phase_dirty_tree(harness_root: Path, deps) -> None:
     """A modified tracked file blocks the transition."""
     deps.git.commit_all(harness_root, "harness setup")
@@ -84,6 +94,7 @@ def test_new_phase_dirty_tree(harness_root: Path, deps) -> None:
     assert cmd_new_phase(_args("p1", "planning"), deps) == 2
 
 
+@pytest.mark.slow
 def test_new_phase_requires_previous_closed(harness_root: Path, deps, capsys) -> None:
     """A new phase is refused while the previous one is still open."""
     assert cmd_new_phase(_args("p1", "planning"), deps) == 0
@@ -91,6 +102,7 @@ def test_new_phase_requires_previous_closed(harness_root: Path, deps, capsys) ->
     assert "not closed" in capsys.readouterr().err
 
 
+@pytest.mark.slow
 def test_new_phase_rejects_existing_name(harness_root: Path, deps, capsys) -> None:
     """A phase name already on disk is refused."""
     assert cmd_new_phase(_args("p1", "planning"), deps) == 0
@@ -101,6 +113,7 @@ def test_new_phase_rejects_existing_name(harness_root: Path, deps, capsys) -> No
     assert "already exists" in capsys.readouterr().err
 
 
+@pytest.mark.slow
 def test_new_phase_commit_failure_restores_state(
     harness_root: Path, deps, broken_deps, capsys
 ) -> None:

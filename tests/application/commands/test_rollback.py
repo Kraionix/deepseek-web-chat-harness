@@ -1,9 +1,16 @@
-"""Tests for `application.commands.rollback`."""
+"""Tests for `application.commands.rollback`.
+
+Four of the five tests exercise a real `verify` + `reset --hard` +
+marker commit cycle; they are marked `slow`. `requires_yes` fails
+before any git work and stays in the fast set.
+"""
 
 from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+
+import pytest
 
 from dwch.application.commands.apply import cmd_apply
 from dwch.application.commands.new_phase import cmd_new_phase
@@ -24,6 +31,7 @@ def test_rollback_requires_yes(harness_root: Path, deps) -> None:
     assert cmd_rollback(_args(yes=False), deps) == 2
 
 
+@pytest.mark.slow
 def test_rollback_increments_count(harness_root: Path, deps) -> None:
     """A successful rollback increments `rollback_count`."""
     cmd_new_phase(Namespace(name="p", kind="planning"), deps)
@@ -37,12 +45,14 @@ def test_rollback_increments_count(harness_root: Path, deps) -> None:
     assert after.rollback_count == before.rollback_count + 1
 
 
+@pytest.mark.slow
 def test_rollback_no_step(harness_root: Path, deps) -> None:
     """Without a step to roll back, rollback refuses."""
     cmd_new_phase(Namespace(name="p", kind="planning"), deps)
     assert cmd_rollback(_args(), deps) == 2
 
 
+@pytest.mark.slow
 def test_rollback_rejects_lifecycle_head(harness_root: Path, deps, capsys) -> None:
     """A phase-start commit is not rolled back."""
     cmd_new_phase(Namespace(name="p", kind="planning"), deps)
@@ -66,6 +76,7 @@ def test_rollback_rejects_lifecycle_head(harness_root: Path, deps, capsys) -> No
     assert after.current_step == 3
 
 
+@pytest.mark.slow
 def test_rollback_uses_microsecond_timestamp(harness_root: Path, deps) -> None:
     """The rollback marker commit uses `now_iso` (microseconds)."""
     cmd_new_phase(Namespace(name="p", kind="planning"), deps)

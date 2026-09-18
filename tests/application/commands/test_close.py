@@ -1,9 +1,19 @@
-"""Tests for `application.commands.close`."""
+"""Tests for `application.commands.close`.
+
+The five tests marked `slow` are the ones the 0.3.1 benchmark put
+above the 0.2-second threshold: each runs `cmd_new_phase` (which
+commits), then `apply summary`, then `close`, and each of those
+three is a git round trip. The other four tests are here for
+coverage of the guard clauses, which fire before the expensive
+path.
+"""
 
 from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+
+import pytest
 
 from dwch.application.commands.apply import cmd_apply
 from dwch.application.commands.close import cmd_close
@@ -57,6 +67,7 @@ def test_close_requires_summary(harness_root: Path, deps, capsys) -> None:
     assert "no summary" in capsys.readouterr().err
 
 
+@pytest.mark.slow
 def test_close_freezes_roadmap(harness_root: Path, deps) -> None:
     """`--freeze` writes the lock, marks state frozen, records summary."""
     _planning_with_roadmap(harness_root, deps)
@@ -88,6 +99,7 @@ def test_close_freeze_no_roadmap(harness_root: Path, deps) -> None:
     assert cmd_close(_args(freeze=True), deps) == 2
 
 
+@pytest.mark.slow
 def test_close_without_freeze(harness_root: Path, deps) -> None:
     """A plain `close` finalizes the phase."""
     cmd_new_phase(Namespace(name="dev", kind="development"), deps)
@@ -97,6 +109,7 @@ def test_close_without_freeze(harness_root: Path, deps) -> None:
     assert state.summary_phase == "dev"
 
 
+@pytest.mark.slow
 def test_close_updates_state_summary(harness_root: Path, deps) -> None:
     """`close` records the summary phase and a non-empty timestamp."""
     cmd_new_phase(Namespace(name="dev", kind="development"), deps)
@@ -107,6 +120,7 @@ def test_close_updates_state_summary(harness_root: Path, deps) -> None:
     assert state.summary_written_at != ""
 
 
+@pytest.mark.slow
 def test_close_twice_refused(harness_root: Path, deps, capsys) -> None:
     """A second `close` on the same phase is refused."""
     cmd_new_phase(Namespace(name="dev", kind="development"), deps)
@@ -138,6 +152,7 @@ def test_close_commit_failure_restores_state(
     assert "was not closed" in err
 
 
+@pytest.mark.slow
 def test_close_tag_uses_seconds(harness_root: Path, deps) -> None:
     """A `--tag` close produces a tag with second resolution."""
     import subprocess

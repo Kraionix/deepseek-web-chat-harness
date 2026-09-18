@@ -1,7 +1,9 @@
 """End-to-end lifecycle tests across every command.
 
-Updated for 0.3.0: `close` now requires a phase summary on disk.
-Every close in this file is preceded by `dwch apply summary`.
+Every test in this file is marked `slow`: each one runs a full
+planning-to-development cycle, touching `new-phase`, `apply`,
+`verify`, and `close` at least once. Skip with `-m "not slow"`
+while iterating on a single module.
 """
 
 from __future__ import annotations
@@ -9,12 +11,16 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 from dwch.application.commands.apply import cmd_apply
 from dwch.application.commands.bootstrap import cmd_bootstrap
 from dwch.application.commands.close import cmd_close
 from dwch.application.commands.new_phase import cmd_new_phase
 from dwch.application.commands.verify import cmd_verify
 from dwch.application.state import load_state
+
+pytestmark = pytest.mark.slow
 
 _ROADMAP = """\
 [meta]

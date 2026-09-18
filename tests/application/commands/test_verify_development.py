@@ -1,11 +1,9 @@
 """Tests for `application.commands.verify` in a development phase.
 
-Updated for 0.3.0: the planning phase that produces the frozen
-roadmap now closes with a summary, so `_plan_and_freeze` writes one
-before calling `close --freeze`.
-
-Updated for 0.3.1: added coverage for the `roadmap-missing` check
-and for the state-restore path when `commit_all` fails.
+Every test here runs a full planning phase first (`_plan_and_freeze`)
+so that the development phase has a frozen roadmap to check
+against. That setup, plus `verify`'s own git calls, makes all eight
+tests slow; the whole file is marked as such.
 """
 
 from __future__ import annotations
@@ -13,11 +11,15 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 from dwch.application.commands.apply import cmd_apply
 from dwch.application.commands.close import cmd_close
 from dwch.application.commands.new_phase import cmd_new_phase
 from dwch.application.commands.verify import cmd_verify
 from dwch.application.state import load_state
+
+pytestmark = pytest.mark.slow
 
 _ROADMAP = """\
 [meta]

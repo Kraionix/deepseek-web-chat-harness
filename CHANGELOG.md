@@ -3,6 +3,47 @@
 Follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-09-18
+
+Test-infrastructure release. No user-facing behaviour changes:
+`config.toml` and `state.toml` keep the `"0.3.0"` format version,
+and no command behaves differently. The point is the test suite.
+
+### Changed
+
+- Test suite runs 3.5× faster on a full `pytest -n 4` run and
+  5.8× faster with `-m "not slow" -n 4`. On Windows the sequence
+  is 28.1 s (baseline) → 17.2 s (serial) → 7.9 s (parallel) →
+  4.9 s (fast parallel). `pytest-xdist` parallelizes with `-n 4`
+  (matching the CI job); a session-scoped git template replaces
+  the per-test `git init` plus three `git config` calls; git
+  identity and `core.autocrlf` are supplied through environment
+  variables.
+- New `slow` pytest marker on the twenty end-to-end tests that the
+  0.3.1 benchmark put above 0.2 seconds. `pytest -m "not slow"`
+  runs 297 of 317 tests in a fraction of the time, for local
+  iteration.
+- CI runs `pytest -n 4 -q`.
+- `[dev]` extras gain `pytest-xdist>=3.5`.
+
+### Internal
+
+- `tests/conftest.py` builds one git repository per session
+  (`_git_template`) and `copytree`s it into each test's
+  `tmp_path / "repo"`. The per-test git cost drops from six
+  subprocesses to a directory copy.
+- `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and
+  `GIT_COMMITTER_EMAIL` are set at conftest import time through
+  `os.environ.setdefault`, and `core.autocrlf=false` is appended to
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`, so no
+  test pays for a `git config` call.
+- The template copies are made writable (`_make_writable`) to clear
+  the read-only bit that git sets on loose objects and `copytree`
+  preserves.
+- `slow` is registered in `[tool.pytest.ini_options].markers`;
+  `--strict-markers` is on, so an unregistered marker fails
+  collection.
+
 ## [0.3.1] - 2026-09-18
 
 Patch release. No format changes: `config.toml` and `state.toml`
@@ -81,7 +122,8 @@ working after upgrading the package.
 - **`verify` could leave the tree dirty after a failed commit.**
   State had already been saved and auto-deviations written. On
   commit failure, state is now restored and the auto file removed;
-  the command exits 2 and the report still explains the checks.
+  the command exits non-zero and the report still explains the
+  checks.
 - **`close` could leave the tree dirty after a failed commit.**
   Same pattern; state and the handoff block are restored and the
   command exits 2.
