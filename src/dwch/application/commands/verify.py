@@ -11,7 +11,10 @@ is still written. The AI needs to see the failure to fix it.
 
 On success, `verify` updates `state.toml` (current_step,
 roadmap_step, last_commit_date) before committing, so the state
-file is included in the same commit as the step's files.
+file is included in the same commit as the step's files. If the
+commit itself fails, state is restored and only the report is left
+behind — a failed verify must not leave the tree in a state that
+looks verified.
 
 Auto-deviations are computed in memory on every run, so the report
 always shows them, but they are written to disk only when the run
@@ -23,9 +26,9 @@ noise.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from argparse import Namespace
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from ...domain.models import CheckResult, Deviation, FileSpec, Report, Roadmap
@@ -44,11 +47,14 @@ from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..format import (
+    format_step,
+    parse_step_arg,
     parse_step_message,
     render_report,
     summarize_check,
+    validate_paths,
 )
-from ..state import load_state, save_state, with_updates
+from ..state import load_state, now_iso, save_state, with_updates
 from ..verify_checks import (
     check_architecture_lock,
     check_compile,
@@ -63,12 +69,9 @@ from ..verify_checks import (
 def cmd_verify(args: Namespace, deps: Deps) -> int:
     """Verify a step. Returns 0 on success, 1 on check failure, 2 on error."""
     try:
-        step_num = int(args.step)
-    except (TypeError, ValueError):
-        print(
-            f"error: step must be an integer, got {args.step!r}",
-            file=sys.stderr,
-        )
+        step_num = parse_step_arg(args.step)
+    except FormatError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
     try:
@@ -86,11 +89,12 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
         )
         return 2
 
+    tag = format_step(step_num)
     steps_dir = (
         deps.project_root / config.paths.get("steps", "steps") / state.current_phase
     )
-    step_file = steps_dir / f"step-{args.step}.txt"
-    apply_log_path = steps_dir / f"apply-{args.step}.log"
+    step_file = steps_dir / f"step-{tag}.txt"
+    apply_log_path = steps_dir / f"apply-{tag}.log"
 
     if not deps.fs.exists(step_file):
         print(f"error: {step_file} not found; run `apply` first", file=sys.stderr)
@@ -103,6 +107,18 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
             f"error: {step_file.name} contains no valid FILE blocks. "
             "The preceding `apply` failed to parse it. "
             "Re-run `apply` with a valid message before verifying.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # The step file may have been edited by hand after `apply`. Its
+    # paths were validated when it was written, but not since. Run
+    # the same validation here before any path is used.
+    try:
+        validate_paths(specs, deps.project_root)
+    except FormatError as exc:
+        print(
+            f"error: {step_file.name} contains an unsafe path: {exc}",
             file=sys.stderr,
         )
         return 2
@@ -149,6 +165,26 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
         )
         return 2
 
+    # A development phase that says it is frozen must actually be
+    # frozen. A missing roadmap file is a real problem: the roadmap
+    # checks would be silently skipped. Report it as a required
+    # check so the report explains the situation.
+    if is_development and is_roadmap_frozen(state) and roadmap is None:
+        checks.append(
+            CheckResult(
+                name="roadmap-missing",
+                command=("roadmap-missing",),
+                exit_code=1,
+                stdout=(
+                    f"state says frozen, but "
+                    f"{roadmap_path.relative_to(deps.project_root)} "
+                    "was not found or could not be parsed"
+                ),
+                stderr="",
+                required=True,
+            )
+        )
+
     for check in checks:
         print(summarize_check(check))
 
@@ -176,10 +212,9 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
     commit_message: str | None = None
 
     if all_required_ok:
-        commit_message = f"step {args.step}: applied and verified"
+        commit_message = f"step {tag}: applied and verified"
         if auto_devs:
             dev_mod.write_auto(deps.fs, dev_dir, step_num, auto_devs)
-        now = datetime.now(UTC).isoformat(timespec="seconds")
         advance_roadmap = (
             is_development
             and is_roadmap_frozen(state)
@@ -189,7 +224,7 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
         updated = with_updates(
             state,
             current_step=step_num,
-            last_commit_date=now,
+            last_commit_date=now_iso(),
             roadmap_step=state.roadmap_step + (1 if advance_roadmap else 0),
         )
         save_state(deps.fs, deps.project_root, updated)
@@ -198,12 +233,26 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
         try:
             commit_hash = deps.git.commit_all(deps.project_root, commit_message)
         except HarnessError as exc:
-            print(f"warning: commit failed: {exc}", file=sys.stderr)
+            # Commit failed: the tree is dirty, state already moved,
+            # and auto-deviations were written. Undo state and the
+            # auto-deviation file, then stop with a non-zero code.
+            # The report is still produced below so the user can see
+            # the checks that ran.
+            save_state(deps.fs, deps.project_root, state)
+            if auto_devs:
+                auto_path = dev_dir / f"step-{step_num:02d}-auto.toml"
+                with contextlib.suppress(HarnessError):
+                    deps.fs.unlink(auto_path)
+            after_step = before_step
+            commit_message = None
+            print(f"error: commit failed: {exc}", file=sys.stderr)
+            print("state was restored; tree is dirty", file=sys.stderr)
+            all_required_ok = False
 
     if commit_hash:
         print(f"commit: {commit_hash}")
     elif not all_required_ok:
-        print("commit: skipped (required check failed)")
+        print("commit: skipped")
 
     all_devs = tuple(declared) + tuple(auto_devs)
     report = Report(
@@ -218,7 +267,7 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
         question="",
     )
     rendered = render_report(report)
-    report_path = steps_dir / f"report-{args.step}.txt"
+    report_path = steps_dir / f"report-{tag}.txt"
     deps.fs.write_text(report_path, rendered)
     print(f"report: {report_path}")
 

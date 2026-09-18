@@ -20,6 +20,7 @@ _SAMPLE = '''\
 CONST = 1
 ANNOTATED: int = 2
 _PRIVATE = 3
+LEFT, RIGHT = 1, 2
 
 
 def public_fn(a, b=1) -> int:
@@ -113,3 +114,48 @@ def test_render_full(tmp_path: Path) -> None:
 def test_render_empty() -> None:
     """No modules renders a placeholder."""
     assert render_module_map([]) == "(no modules)\n"
+
+
+def test_render_keeps_annotations_and_defaults(tmp_path: Path) -> None:
+    """A signature keeps parameter annotations and defaults.
+
+    `ast.unparse` normalizes string literals to single quotes, so a
+    `b: str = "x"` default renders as `b: str = 'x'`. The test
+    asserts on the normalized form.
+    """
+    body = 'def f(a: int, b: str = "x") -> None:\n    pass\n'
+    (tmp_path / "m.py").write_text(body, encoding="utf-8")
+    modules = build_module_map(_FS, tmp_path)
+    text = render_module_map(modules, full=False)
+    assert "a: int" in text
+    assert "b: str = 'x'" in text
+    assert "-> None" in text
+
+
+def test_render_keeps_keyword_only_annotations(tmp_path: Path) -> None:
+    """Keyword-only arguments render with annotations and defaults."""
+    body = "def f(*, a: int, b: str = 'y'):\n    pass\n"
+    (tmp_path / "m.py").write_text(body, encoding="utf-8")
+    modules = build_module_map(_FS, tmp_path)
+    text = render_module_map(modules, full=False)
+    assert "a: int" in text
+    assert "b: str = 'y'" in text
+
+
+def test_tuple_assignment_yields_both_names(tmp_path: Path) -> None:
+    """`a, b = 1, 2` produces two constants, not zero."""
+    body = "left, right = 1, 2\n"
+    (tmp_path / "m.py").write_text(body, encoding="utf-8")
+    modules = build_module_map(_FS, tmp_path)
+    names = {s.name for s in modules[0].symbols}
+    assert "left" in names
+    assert "right" in names
+
+
+def test_tuple_assignment_in_sample(tmp_path: Path) -> None:
+    """The `LEFT, RIGHT` line in the shared sample yields two names."""
+    (tmp_path / "m.py").write_text(_SAMPLE, encoding="utf-8")
+    modules = build_module_map(_FS, tmp_path)
+    names = {s.name for s in modules[0].symbols}
+    assert "LEFT" in names
+    assert "RIGHT" in names

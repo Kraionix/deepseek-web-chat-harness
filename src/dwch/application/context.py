@@ -26,9 +26,13 @@ from importlib.resources import files
 
 from ..domain.models import BootstrapResult, Config, Roadmap, State
 from ..domain.rules import is_development_phase
+from ..shared.errors import HarnessError
 from . import deviations as dev_mod
 from . import roadmap as roadmap_mod
 from .deps import Deps
+from .format import report_sort_key
+from .handoff import BEGIN as HANDOFF_BEGIN
+from .handoff import END as HANDOFF_END
 from .module_map import build_module_map, render_module_map
 from .token_counter import count_sections
 
@@ -70,7 +74,7 @@ def build_bootstrap(
     truncated = False
     if total > max_tokens and config.bootstrap.get("truncate", True):
         sections, breakdown, total, truncated = _truncate(
-            deps, sections, breakdown, total, max_tokens
+            sections, breakdown, total, max_tokens
         )
 
     text = "\n\n".join(
@@ -143,13 +147,19 @@ def _collect_sections(
 
 
 def _truncate(
-    deps: Deps,
     sections: dict[str, str],
     breakdown: dict[str, int],
     total: int,
     max_tokens: int,
 ) -> tuple[dict[str, str], dict[str, int], int, bool]:
-    """Drop optional sections until the total fits `max_tokens`."""
+    """Drop optional sections until the total fits `max_tokens`.
+
+    `truncated` is True only if at least one section was actually
+    removed. A bootstrap whose optional sections were all absent
+    cannot be "truncated" even when it exceeds the budget: the
+    mandatory sections are what they are.
+    """
+    dropped = False
     for name in _TRUNCATION_PRIORITY:
         if total <= max_tokens:
             break
@@ -157,7 +167,8 @@ def _truncate(
             continue
         total -= breakdown.pop(name, 0)
         sections.pop(name)
-    return sections, breakdown, total, True
+        dropped = True
+    return sections, breakdown, total, dropped
 
 
 def _header(deps: Deps, config: Config, state: State) -> str:
@@ -193,11 +204,38 @@ def _previous_summary(deps: Deps, state: State) -> str | None:
 
 
 def _task(deps: Deps) -> str:
+    """Render the handoff prose without the harness-owned block.
+
+    `header` already shows phase, step, roadmap version, and frozen
+    flag. The `harness:begin`/`harness:end` block inside the handoff
+    carries the same values with a different layout; including it
+    twice would only add tokens. The block is stripped here so the
+    reader sees the human-written part of the handoff, and only it.
+    """
     path = deps.project_root / ".harness" / "handoff.md"
     if not deps.fs.exists(path):
         return "## Task\n\nNo handoff file. Describe the current phase."
     text = deps.fs.read_text(path)
-    return f"## Task\n\n{text.strip()}"
+    stripped = _strip_handoff_block(text).strip()
+    if not stripped:
+        return "## Task\n\n(handoff is empty)"
+    return f"## Task\n\n{stripped}"
+
+
+def _strip_handoff_block(text: str) -> str:
+    """Remove the first `BEGIN ... END` block, if present.
+
+    A lighter version of the regex in `handoff.py`, repeated here to
+    avoid importing a private symbol across modules. Both markers
+    must be present for a strip to happen.
+    """
+    start = text.find(HANDOFF_BEGIN)
+    if start == -1:
+        return text
+    end = text.find(HANDOFF_END, start)
+    if end == -1:
+        return text
+    return text[:start] + text[end + len(HANDOFF_END) :]
 
 
 def _essential(deps: Deps, config: Config) -> str:
@@ -278,14 +316,20 @@ def _current_phase_reports(deps: Deps, config: Config, state: State) -> str:
     Scoped to `steps/{state.current_phase}/`. Reports from earlier
     phases are not shown: their intent lives in the previous phase's
     summary, and their details are not relevant to the current step.
+
+    Reports are sorted by their numeric step, not by filename: a
+    lexicographic sort would place `report-2.txt` after
+    `report-10.txt`. `n <= 0` renders the empty placeholder.
     """
     n = int(config.bootstrap.get("reports_current_phase", 1))
+    if n <= 0:
+        return "## Recent reports\n\n(none)"
     steps_dir = (
         deps.project_root / config.paths.get("steps", "steps") / state.current_phase
     )
     if not deps.fs.is_dir(steps_dir):
         return "## Recent reports\n\n(none)"
-    reports = sorted(deps.fs.glob(steps_dir, "report-*.txt"))
+    reports = sorted(deps.fs.glob(steps_dir, "report-*.txt"), key=report_sort_key)
     if not reports:
         return "## Recent reports\n\n(none)"
     parts = ["## Recent reports"]
@@ -309,7 +353,7 @@ def _module_map(deps: Deps, config: Config) -> str:
 def _recent_commits(deps: Deps) -> str:
     try:
         log = deps.git.log_oneline(deps.project_root, 5)
-    except Exception:
+    except HarnessError:
         log = []
     lines = ["## Recent commits"]
     if not log:

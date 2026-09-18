@@ -8,8 +8,11 @@ import pytest
 
 from dwch.application.format import (
     detect_marker_collision,
+    format_step,
+    parse_step_arg,
     parse_step_message,
     render_report,
+    report_sort_key,
     summarize_check,
     summarize_deviation,
     validate_paths,
@@ -85,6 +88,27 @@ def test_parse_ignores_prose() -> None:
     assert len(parse_step_message(text)) == 1
 
 
+def test_parse_close_marker_with_trailing_space() -> None:
+    """A close marker with trailing whitespace is recognized."""
+    text = "<<<FILE:a.py>>>\nx = 1\n<<<END>>>   \n"
+    specs = parse_step_message(text)
+    assert specs[0].content == "x = 1\n"
+
+
+def test_parse_close_marker_with_trailing_tab() -> None:
+    """A close marker with a trailing tab is recognized."""
+    text = "<<<FILE:a.py>>>\nx = 1\n<<<END>>>\t\n"
+    specs = parse_step_message(text)
+    assert specs[0].content == "x = 1\n"
+
+
+def test_parse_open_marker_with_trailing_space() -> None:
+    """An open marker with trailing whitespace is recognized."""
+    text = "<<<FILE:a.py>>>   \nx = 1\n<<<END>>>\n"
+    specs = parse_step_message(text)
+    assert specs[0].path == "a.py"
+
+
 @pytest.mark.parametrize(
     "path",
     ["/abs/path.py", "../escape.py", "src/../../escape.py"],
@@ -107,6 +131,13 @@ def test_detect_marker_collision_bare_end() -> None:
         detect_marker_collision(spec)
 
 
+def test_detect_marker_collision_bare_end_with_space() -> None:
+    """A bare `<<<END>>>` with trailing whitespace is rejected."""
+    spec = FileSpec(path="a.py", content="before\n<<<END>>>   \nafter\n")
+    with pytest.raises(FormatError, match="bare"):
+        detect_marker_collision(spec)
+
+
 def test_detect_marker_collision_file_open_ok() -> None:
     """A `<<<FILE:...>>>` line inside content is allowed."""
     spec = FileSpec(
@@ -114,6 +145,65 @@ def test_detect_marker_collision_file_open_ok() -> None:
         content="docstring example:\n<<<FILE:foo>>>\nreal content\n",
     )
     detect_marker_collision(spec)
+
+
+def test_format_step_single_digit() -> None:
+    """A single-digit step gets a leading zero."""
+    assert format_step(1) == "01"
+    assert format_step(9) == "09"
+
+
+def test_format_step_two_digits() -> None:
+    """A two-digit step is unchanged."""
+    assert format_step(10) == "10"
+    assert format_step(99) == "99"
+
+
+def test_format_step_three_digits() -> None:
+    """A three-digit step is not truncated."""
+    assert format_step(100) == "100"
+
+
+def test_parse_step_arg_integer() -> None:
+    """A plain integer is parsed."""
+    assert parse_step_arg("1") == 1
+    assert parse_step_arg("42") == 42
+
+
+def test_parse_step_arg_leading_zeros() -> None:
+    """Leading zeros do not change the value."""
+    assert parse_step_arg("01") == 1
+    assert parse_step_arg("001") == 1
+
+
+def test_parse_step_arg_zero() -> None:
+    """Zero is rejected."""
+    with pytest.raises(FormatError, match="must be >= 1"):
+        parse_step_arg("0")
+
+
+def test_parse_step_arg_negative() -> None:
+    """A negative number is rejected."""
+    with pytest.raises(FormatError, match="must be >= 1"):
+        parse_step_arg("-1")
+
+
+def test_parse_step_arg_non_integer() -> None:
+    """A non-integer is rejected."""
+    with pytest.raises(FormatError, match="positive integer"):
+        parse_step_arg("abc")
+
+
+def test_report_sort_key_numeric_order() -> None:
+    """`report-2.txt` sorts before `report-10.txt`."""
+    a = report_sort_key(Path("report-2.txt"))
+    b = report_sort_key(Path("report-10.txt"))
+    assert a < b
+
+
+def test_report_sort_key_no_match() -> None:
+    """A name that does not match sorts first."""
+    assert report_sort_key(Path("other.txt")) == -1
 
 
 def test_render_report_minimal() -> None:

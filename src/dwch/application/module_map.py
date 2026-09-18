@@ -5,6 +5,10 @@ list of symbols it exports, with signatures for classes and
 functions. It is what the AI uses as a substitute for reading the
 code, so the extraction is deliberately structural — no docstrings
 beyond the module's first line, no bodies, no private symbols.
+
+Signature rendering keeps annotations and defaults: the AI reads
+the map instead of the source, so `def f(a: int, b: str = "x")`
+must not degrade to `def f(a, b)`.
 """
 
 from __future__ import annotations
@@ -143,14 +147,30 @@ def _public_symbols(tree: ast.Module, *, include_private: bool) -> list[SymbolIn
                 )
             )
         elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and _is_public(
-                    target.id, include_private
-                ):
-                    out.append(_constant_symbol(target.id))
+            for name in _assign_names(node.targets):
+                if _is_public(name, include_private):
+                    out.append(_constant_symbol(name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             if _is_public(node.target.id, include_private):
                 out.append(_constant_symbol(node.target.id))
+    return out
+
+
+def _assign_names(targets: list[ast.expr]) -> list[str]:
+    """Return every `Name` bound by a tuple/list/name assignment.
+
+    `a, b = 1, 2` binds two names, but `ast.Assign.targets` holds a
+    single `ast.Tuple`. Without recursion the two names would be
+    invisible to the map.
+    """
+    out: list[str] = []
+    for target in targets:
+        if isinstance(target, ast.Name):
+            out.append(target.id)
+        elif isinstance(target, ast.Tuple | ast.List):
+            for elt in target.elts:
+                if isinstance(elt, ast.Name):
+                    out.append(elt.id)
     return out
 
 
@@ -170,7 +190,7 @@ def _is_public(name: str, include_private: bool) -> bool:
     return not name.startswith("_")
 
 
-def _render_function(node: ast.AST) -> str:
+def _render_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     args = _render_args(node.args)
     ret = ""
     if node.returns is not None:
@@ -187,22 +207,47 @@ def _render_class(node: ast.ClassDef) -> str:
 
 
 def _render_args(args: ast.arguments) -> str:
+    """Render an argument list with annotations and defaults.
+
+    The positional and positional-only arguments share the
+    `defaults` list, which is right-aligned: `def f(a, b=1)` has
+    `args=[a, b]` and `defaults=[1]`, so `a` has no default and `b`
+    does. Keyword-only defaults live in `kw_defaults`, where `None`
+    means "required".
+    """
+    pos = [*args.posonlyargs, *args.args]
+    pad = len(pos) - len(args.defaults)
+    defaulted: list[str | None] = [None] * pad + [ast.unparse(d) for d in args.defaults]
+
     parts: list[str] = []
-    for arg in args.posonlyargs:
-        parts.append(arg.arg)
+    for i, arg in enumerate(args.posonlyargs):
+        parts.append(_render_arg(arg, defaulted[i]))
     if args.posonlyargs:
         parts.append("/")
-    for arg in args.args:
-        parts.append(arg.arg)
+    offset = len(args.posonlyargs)
+    for i, arg in enumerate(args.args):
+        parts.append(_render_arg(arg, defaulted[offset + i]))
     if args.vararg:
-        parts.append(f"*{args.vararg.arg}")
+        parts.append("*" + _render_arg(args.vararg, None))
     elif args.kwonlyargs:
         parts.append("*")
-    for arg in args.kwonlyargs:
-        parts.append(arg.arg)
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+        parts.append(
+            _render_arg(arg, None if default is None else ast.unparse(default))
+        )
     if args.kwarg:
-        parts.append(f"**{args.kwarg.arg}")
+        parts.append("**" + _render_arg(args.kwarg, None))
     return ", ".join(parts)
+
+
+def _render_arg(arg: ast.arg, default: str | None) -> str:
+    """Render one `ast.arg` with its annotation and default, if any."""
+    text = arg.arg
+    if arg.annotation is not None:
+        text += f": {ast.unparse(arg.annotation)}"
+    if default is not None:
+        text += f" = {default}"
+    return text
 
 
 __all__ = ["build_module_map", "extract_public_symbols", "render_module_map"]

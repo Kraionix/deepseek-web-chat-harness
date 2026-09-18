@@ -124,6 +124,16 @@ class GitPort(Protocol):
         """
         ...
 
+    def last_commit_subject(self, cwd: Path) -> str:
+        """Return the subject line of HEAD, or "" when unavailable.
+
+        Used by `rollback` to tell a verify commit (`step NN: ...`)
+        apart from a lifecycle commit (`chore: close phase ...`,
+        `chore: start ... phase ...`). A repository with no commits
+        is not an error: the method returns an empty string.
+        """
+        ...
+
     def commit_all(self, cwd: Path, message: str) -> str: ...
     def reset_hard(self, cwd: Path, ref: str) -> None: ...
     def tag(self, cwd: Path, name: str, message: str) -> None: ...

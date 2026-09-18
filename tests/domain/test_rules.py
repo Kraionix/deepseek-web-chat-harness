@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from dwch.domain.models import (
     Deviation,
     DeviationType,
@@ -19,6 +21,7 @@ from dwch.domain.rules import (
     is_state_consistent,
     is_substantive,
     is_unset_phase,
+    phase_name_error,
 )
 
 
@@ -160,3 +163,77 @@ def test_state_consistent_rejects_empty_phase() -> None:
 def test_state_consistent_rejects_negative_step() -> None:
     """A negative counter is inconsistent."""
     assert not is_state_consistent(_state(current_step=-1))
+
+
+def test_phase_name_error_ok() -> None:
+    """A simple slug passes."""
+    assert phase_name_error("00-planning") is None
+
+
+def test_phase_name_error_underscore() -> None:
+    """An underscore is allowed."""
+    assert phase_name_error("my_phase") is None
+
+
+def test_phase_name_error_empty() -> None:
+    """An empty name is rejected."""
+    assert phase_name_error("") == "phase name must be non-empty"
+
+
+def test_phase_name_error_space() -> None:
+    """A space is rejected."""
+    assert "spaces" in phase_name_error("has space")
+
+
+def test_phase_name_error_leading_space() -> None:
+    """Leading whitespace is rejected."""
+    assert "whitespace" in phase_name_error(" leading")
+
+
+def test_phase_name_error_newline() -> None:
+    """An embedded newline is rejected."""
+    err = phase_name_error("a\nb")
+    assert err is not None
+    assert "newlines" in err or "control" in err
+
+
+def test_phase_name_error_tab() -> None:
+    """An embedded tab is rejected."""
+    err = phase_name_error("a\tb")
+    assert err is not None
+    assert "tabs" in err or "control" in err
+
+
+def test_phase_name_error_nul() -> None:
+    """A NUL byte is rejected."""
+    err = phase_name_error("a\x00b")
+    assert err is not None
+    assert "control" in err
+
+
+def test_phase_name_error_slash() -> None:
+    """A forward slash is rejected."""
+    assert "path separators" in phase_name_error("a/b")
+
+
+def test_phase_name_error_backslash() -> None:
+    """A backslash is rejected."""
+    assert "path separators" in phase_name_error("a\\b")
+
+
+def test_phase_name_error_dot() -> None:
+    """A single dot is rejected."""
+    assert phase_name_error(".") == "phase name must not be '.' or '..'"
+
+
+def test_phase_name_error_dotdot() -> None:
+    """Two dots are rejected."""
+    assert phase_name_error("..") == "phase name must not be '.' or '..'"
+
+
+@pytest.mark.parametrize("bad", ["a<b", "a>b", 'a"b', "a:b", "a|b", "a?b", "a*b"])
+def test_phase_name_error_reserved_chars(bad: str) -> None:
+    """Every reserved character is rejected."""
+    err = phase_name_error(bad)
+    assert err is not None
+    assert "invalid characters" in err

@@ -42,6 +42,26 @@ def test_parse_bad_toml() -> None:
         dm.parse("not = ", Path("x.toml"))
 
 
+def test_parse_deviation_string_raises() -> None:
+    """A string `deviation` field is a `DeviationError`."""
+    with pytest.raises(DeviationError, match="expected a list of tables"):
+        dm.parse('deviation = "abc"\n', Path("x.toml"))
+
+
+def test_parse_affected_string_raises() -> None:
+    """A bare string `affected` is rejected, not split into characters."""
+    body = '[[deviation]]\ntype = "assumption"\naffected = "src/x.py"\nreason = "r"\n'
+    with pytest.raises(DeviationError, match="expected a list of strings"):
+        dm.parse(body, Path("x.toml"))
+
+
+def test_parse_auto_string_raises() -> None:
+    """A string `auto = "false"` is rejected, not truthy."""
+    body = '[[deviation]]\ntype = "assumption"\nreason = "r"\nauto = "false"\n'
+    with pytest.raises(DeviationError, match="auto must be a boolean"):
+        dm.parse(body, Path("x.toml"))
+
+
 def test_render_parse_round_trip() -> None:
     """Rendering then parsing preserves a reason with a newline."""
     devs = [
@@ -91,6 +111,26 @@ def test_load_recent_limits(tmp_path: Path) -> None:
     assert result[-1].reason == "3"
 
 
+def test_load_recent_zero_returns_empty(tmp_path: Path) -> None:
+    """`n == 0` returns an empty list, not the whole set."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "step-01.toml").write_text(
+        '[[deviation]]\ntype = "assumption"\nreason = "r"\n',
+        encoding="utf-8",
+    )
+    assert dm.load_recent(_FS, tmp_path, 0) == []
+
+
+def test_load_recent_negative_returns_empty(tmp_path: Path) -> None:
+    """A negative `n` returns an empty list."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "step-01.toml").write_text(
+        '[[deviation]]\ntype = "assumption"\nreason = "r"\n',
+        encoding="utf-8",
+    )
+    assert dm.load_recent(_FS, tmp_path, -1) == []
+
+
 def test_load_recent_missing_dir(tmp_path: Path) -> None:
     """A missing directory yields an empty list."""
     assert dm.load_recent(_FS, tmp_path / "nope", 5) == []
@@ -121,6 +161,20 @@ def test_write_auto_empty_noop(tmp_path: Path) -> None:
 def test_summarize_empty() -> None:
     """No deviations renders a placeholder."""
     assert "(none)" in dm.summarize([], 5)
+
+
+def test_summarize_zero_returns_placeholder() -> None:
+    """`n == 0` renders the placeholder, not the whole list."""
+    devs = [
+        Deviation(
+            type=DeviationType.ASSUMPTION,
+            affected=(),
+            reason="r",
+            detail="",
+            auto=False,
+        )
+    ]
+    assert "(none)" in dm.summarize(devs, 0)
 
 
 def test_summarize_lists_recent() -> None:

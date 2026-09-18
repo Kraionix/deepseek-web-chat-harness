@@ -35,6 +35,14 @@ def test_config_format_version_is_0_3_0(tmp_path: Path) -> None:
     assert cfg.harness_version == "0.3.0"
 
 
+def test_default_config_has_no_phases_key(tmp_path: Path) -> None:
+    """`paths.phases` is gone: it was never read by any code."""
+    _write(tmp_path, config_to_toml("p"))
+    cfg = load_config(LocalFilesystem(), tmp_path)
+    assert "phases" not in cfg.paths
+    assert "phases" not in config_to_toml("p")
+
+
 def test_bootstrap_reports_current_phase_default(tmp_path: Path) -> None:
     """The default config has `reports_current_phase = 1`."""
     _write(tmp_path, config_to_toml("p"))
@@ -118,3 +126,16 @@ def test_planning_command_must_be_a_list(tmp_path: Path) -> None:
     _write(tmp_path, body)
     with pytest.raises(ConfigError, match="expected a list"):
         load_config(LocalFilesystem(), tmp_path)
+
+
+def test_legacy_config_with_phases_key_loads(tmp_path: Path) -> None:
+    """A config that still has `paths.phases` from 0.3.0 keeps working."""
+    body = config_to_toml("p").replace(
+        '[paths]\nsteps = "steps"',
+        '[paths]\nsteps = "steps"\nphases = "phases"',
+    )
+    _write(tmp_path, body)
+    cfg = load_config(LocalFilesystem(), tmp_path)
+    # The key survives in `paths` because the loader merges user
+    # keys, but nothing in the harness reads it.
+    assert cfg.paths["steps"] == "steps"

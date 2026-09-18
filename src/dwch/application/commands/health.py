@@ -57,6 +57,11 @@ def _check_venv() -> tuple[str, bool, str, bool]:
 def _check_git(deps: Deps) -> tuple[str, bool, str, bool]:
     """Check git state.
 
+    A `.git` entry is either a directory (the common case) or a
+    file (a linked worktree or a submodule). Both are valid git
+    repositories and both are accepted; only a missing entry is a
+    failure.
+
     Two cases are not errors:
 
     - Untracked files only (e.g. a fresh `.harness/` right after
@@ -69,8 +74,9 @@ def _check_git(deps: Deps) -> tuple[str, bool, str, bool]:
     Only tracked, uncommitted modifications count as dirty here.
     """
     root = deps.project_root
-    if not deps.fs.is_dir(root / ".git"):
-        return ("git", False, "no .git directory", True)
+    git_entry = root / ".git"
+    if not (deps.fs.is_dir(git_entry) or deps.fs.is_file(git_entry)):
+        return ("git", False, "no .git directory or file", True)
 
     try:
         lines = deps.git.status_short(root)

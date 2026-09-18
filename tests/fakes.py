@@ -8,6 +8,7 @@ semantics (`rollback` uses `git reset --hard`).
 `RenameFails` subclasses `LocalFilesystem` rather than implementing
 the port from scratch: it exercises the real adapter and only
 overrides the one method that must fail for the atomicity test.
+`CommitFails` does the same for `CliGit`.
 """
 
 from __future__ import annotations
@@ -15,8 +16,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from dwch.adapters.filesystem import LocalFilesystem
+from dwch.adapters.git import CliGit
 from dwch.domain.models import ProcessResult
-from dwch.shared.errors import FilesystemError
+from dwch.shared.errors import FilesystemError, GitError
 
 
 class InMemoryClipboard:
@@ -102,7 +104,22 @@ class RenameFails(LocalFilesystem):
         raise FilesystemError(f"rename disabled for test: {src} -> {dst}")
 
 
+class CommitFails(CliGit):
+    """`CliGit` whose `commit_all` always raises.
+
+    Used to prove that `verify`, `close`, and `new-phase` restore
+    state when the lifecycle commit fails. Every other method is the
+    real implementation, so reads (is_clean, status_short, try_head)
+    behave as they do in production.
+    """
+
+    def commit_all(self, cwd: Path, message: str) -> str:
+        """Refuse every commit, with a message naming the subject."""
+        raise GitError(f"commit disabled for test: {message!r}")
+
+
 __all__ = [
+    "CommitFails",
     "InMemoryClipboard",
     "InMemoryCounter",
     "InMemoryProcess",

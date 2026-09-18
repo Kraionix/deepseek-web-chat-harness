@@ -16,10 +16,14 @@ The summary requirement is deliberate: it is the only cross-phase
 context the next session sees, and a phase that ends without one
 leaves the next chat blind.
 
-Timestamps are written with microsecond precision, because
+Timestamps use `state.now_iso()` (microsecond precision), because
 `is_phase_closed` compares `last_closed` and `last_opened` as
 strings; second-resolution would let a rapid close/new-phase pair
 collide.
+
+If the commit fails, state is restored and the command exits 2:
+the phase was not closed, and the next command must see the
+pre-close state.
 """
 
 from __future__ import annotations
@@ -39,11 +43,13 @@ from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..handoff import ensure_metadata
-from ..state import load_state, save_state, set_roadmap_frozen, with_updates
-
-# Must match `state._TIMESTAMP_TIMESPEC`; see that module for the
-# rationale.
-_TIMESTAMP_TIMESPEC = "microseconds"
+from ..state import (
+    load_state,
+    now_iso,
+    save_state,
+    set_roadmap_frozen,
+    with_updates,
+)
 
 
 def cmd_close(args: Namespace, deps: Deps) -> int:
@@ -89,7 +95,7 @@ def cmd_close(args: Namespace, deps: Deps) -> int:
         return 2
 
     head = deps.git.try_head(deps.project_root)
-    now = datetime.now(UTC).isoformat(timespec=_TIMESTAMP_TIMESPEC)
+    now = now_iso()
 
     if args.freeze:
         rc = _freeze(deps, config, state, head, now)
@@ -99,31 +105,41 @@ def cmd_close(args: Namespace, deps: Deps) -> int:
     # Reload: `_freeze` writes state itself. The reload keeps the
     # summary record consistent with any freeze-side changes
     # (roadmap_frozen, roadmap_step).
-    state = load_state(deps.fs, deps.project_root)
+    before = load_state(deps.fs, deps.project_root)
     updated = with_updates(
-        state,
+        before,
         last_commit=head,
         last_commit_date=now,
         last_closed=now,
-        summary_phase=state.current_phase,
+        summary_phase=before.current_phase,
         summary_written_at=now,
     )
     save_state(deps.fs, deps.project_root, updated)
     ensure_metadata(deps.fs, deps.project_root, updated)
 
-    # Commit the close transition. Without this, the tree is left
-    # dirty and the next command that requires a clean tree would
-    # refuse to run.
     try:
         commit = deps.git.commit_all(
             deps.project_root, f"chore: close phase {updated.current_phase}"
         )
         print(f"commit: {commit}")
     except HarnessError as exc:
-        print(f"warning: could not commit close: {exc}", file=sys.stderr)
+        # Close did not happen. Restore state and the handoff block,
+        # then exit 2. The tree is dirty; the user must resolve it.
+        save_state(deps.fs, deps.project_root, before)
+        ensure_metadata(deps.fs, deps.project_root, before)
+        print(f"error: commit failed: {exc}", file=sys.stderr)
+        print(
+            "state was restored; the phase was not closed. "
+            "Fix the tree and re-run `dwch close`.",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.tag and head:
-        tag = f"session-{datetime.now(UTC).strftime('%Y%m%d-%H%M')}"
+        # Second-resolution: a minute-resolution tag collides on a
+        # rapid close/reopen/close sequence, and a second-resolution
+        # one does not.
+        tag = f"session-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
         try:
             deps.git.tag(deps.project_root, tag, f"session close at {now}")
             print(f"tagged: {tag}")

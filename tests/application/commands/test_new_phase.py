@@ -52,6 +52,31 @@ def test_new_phase_rejects_space(harness_root: Path, deps) -> None:
     assert cmd_new_phase(_args("has space", "planning"), deps) == 2
 
 
+def test_new_phase_rejects_newline(harness_root: Path, deps, capsys) -> None:
+    """A name with an embedded newline is refused before any write."""
+    assert cmd_new_phase(_args("a\nb", "planning"), deps) == 2
+    err = capsys.readouterr().err
+    assert "newlines" in err or "control" in err
+    # No directory was created and no state was written.
+    assert not (harness_root / "steps" / "a\nb").exists()
+    state = load_state(deps.fs, harness_root)
+    assert state.current_phase == "unset"
+
+
+def test_new_phase_rejects_tab(harness_root: Path, deps, capsys) -> None:
+    """A name with an embedded tab is refused."""
+    assert cmd_new_phase(_args("a\tb", "planning"), deps) == 2
+    err = capsys.readouterr().err
+    assert "tabs" in err or "control" in err
+
+
+def test_new_phase_rejects_nul(harness_root: Path, deps, capsys) -> None:
+    """A name containing NUL is refused before `Path.exists`."""
+    assert cmd_new_phase(_args("a\x00b", "planning"), deps) == 2
+    err = capsys.readouterr().err
+    assert "control" in err
+
+
 def test_new_phase_dirty_tree(harness_root: Path, deps) -> None:
     """A modified tracked file blocks the transition."""
     deps.git.commit_all(harness_root, "harness setup")
@@ -74,3 +99,18 @@ def test_new_phase_rejects_existing_name(harness_root: Path, deps, capsys) -> No
     # `steps/p1/` now exists; reusing the name is refused.
     assert cmd_new_phase(_args("p1", "planning"), deps) == 2
     assert "already exists" in capsys.readouterr().err
+
+
+def test_new_phase_commit_failure_restores_state(
+    harness_root: Path, deps, broken_deps, capsys
+) -> None:
+    """A failed commit leaves state at the pre-phase values."""
+    before = load_state(deps.fs, harness_root)
+    rc = cmd_new_phase(Namespace(name="p1", kind="planning"), broken_deps)
+    assert rc == 2
+    after = load_state(deps.fs, harness_root)
+    assert after.current_phase == before.current_phase
+    assert after.phase_kind == before.phase_kind
+    err = capsys.readouterr().err
+    assert "commit failed" in err
+    assert "did not start" in err

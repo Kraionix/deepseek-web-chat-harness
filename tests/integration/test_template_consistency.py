@@ -48,6 +48,12 @@ def test_config_to_toml_parses() -> None:
     assert data["bootstrap"]["reports_current_phase"] == 1
 
 
+def test_config_to_toml_has_no_phases_key() -> None:
+    """`paths.phases` is gone."""
+    data = tomllib.loads(config_to_toml("demo"))
+    assert "phases" not in data["paths"]
+
+
 def test_state_written_by_save_matches_render(tmp_path) -> None:
     """The state file on disk is exactly what `_render_state` produces."""
     from dwch.adapters.filesystem import LocalFilesystem

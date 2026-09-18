@@ -5,10 +5,17 @@ The step format is fixed and minimal: blocks delimited by
 ignored. There is no escaping and no nesting; the parser is a
 single forward scan that tracks whether it is inside a block, so a
 literal `<<<FILE:...>>>` line inside content is not a marker.
+
+Step numbers are canonicalized here: `1`, `01`, and `001` all name
+the same step, and every command that builds a step filename goes
+through `format_step`. Likewise, `report_sort_key` extracts the
+numeric part so that `report-1.txt` and `report-10.txt` sort in
+numeric rather than lexicographic order.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from ..domain.models import CheckResult, Deviation, FileSpec, Report
@@ -16,6 +23,8 @@ from ..shared.errors import FormatError
 
 FILE_OPEN = "<<<FILE:"
 FILE_CLOSE = "<<<END>>>"
+
+_REPORT_RE = re.compile(r"^report-(\d+)\.txt$")
 
 
 def parse_step_message(text: str) -> list[FileSpec]:
@@ -26,6 +35,11 @@ def parse_step_message(text: str) -> list[FileSpec]:
           the blocks appeared. Paths are unique.
     Raises: `FormatError` on an unclosed block, an empty path, a
           duplicate path, or no blocks at all.
+
+    Trailing whitespace around the marker lines is tolerated: the
+    parser compares an `rstrip()`-ed line. A human copying from a
+    chat window sometimes leaves a trailing space after
+    `<<<END>>>`.
     """
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     specs: list[FileSpec] = []
@@ -33,8 +47,9 @@ def parse_step_message(text: str) -> list[FileSpec]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.startswith(FILE_OPEN) and line.endswith(">>>"):
-            path = line[len(FILE_OPEN) : -3].strip()
+        if line.startswith(FILE_OPEN) and line.rstrip().endswith(">>>"):
+            stripped = line.rstrip()
+            path = stripped[len(FILE_OPEN) : -3].strip()
             if not path:
                 raise FormatError(f"empty path at line {i + 1}")
             if path in seen:
@@ -42,7 +57,7 @@ def parse_step_message(text: str) -> list[FileSpec]:
             seen.add(path)
             i += 1
             buf: list[str] = []
-            while i < len(lines) and lines[i] != FILE_CLOSE:
+            while i < len(lines) and lines[i].rstrip() != FILE_CLOSE:
                 buf.append(lines[i])
                 i += 1
             if i >= len(lines):
@@ -83,20 +98,62 @@ def detect_marker_collision(spec: FileSpec) -> None:
     """Raise `FormatError` if `spec.content` would break the parser.
 
     A content that contains the literal `<<<END>>>` on its own line
-    would be interpreted as the closing marker on a subsequent
-    re-parse. The parser cannot distinguish the two. Refusing the
-    step is safer than writing a file that breaks future tooling.
+    (modulo trailing whitespace) would be interpreted as the closing
+    marker on a subsequent re-parse. The parser cannot distinguish
+    the two. Refusing the step is safer than writing a file that
+    breaks future tooling.
 
     A literal `<<<FILE:...>>>` line inside content is *not* a
     problem: the parser tracks whether it is inside a block, so an
     opening marker only counts when it appears outside one.
     """
     for line in spec.content.split("\n"):
-        if line == FILE_CLOSE:
+        if line.rstrip() == FILE_CLOSE:
             raise FormatError(
                 f"content of {spec.path!r} contains a bare "
                 f"{FILE_CLOSE!r} line, which would break the parser"
             )
+
+
+def format_step(number: int) -> str:
+    """Return the canonical filename fragment for a step number.
+
+    Two digits for numbers below 100, more when needed: `1` -> `01`,
+    `100` -> `100`. Every command that builds `step-NN.txt`,
+    `apply-NN.log`, or `report-NN.txt` goes through this function so
+    the names agree across commands.
+    """
+    return f"{number:02d}"
+
+
+def parse_step_arg(raw: str) -> int:
+    """Parse a step argument into a canonical positive integer.
+
+    Accepts `1`, `01`, `001`. Rejects non-integers and non-positive
+    values with `FormatError`. Callers convert to exit code 2 for
+    CLI input; internal callers let it propagate.
+    """
+    try:
+        n = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise FormatError(f"step must be a positive integer, got {raw!r}") from exc
+    if n < 1:
+        raise FormatError(f"step must be >= 1, got {n}")
+    return n
+
+
+def report_sort_key(path: Path) -> int:
+    """Return the numeric step number from a `report-NN.txt` filename.
+
+    Non-matching names sort to -1 so they end up first under
+    `sorted(..., key=report_sort_key)`. `[-n:]` then picks the
+    numerically newest reports, not the lexicographically newest
+    (`report-1.txt, report-10.txt, report-2.txt, ...`).
+    """
+    match = _REPORT_RE.match(path.name)
+    if match is None:
+        return -1
+    return int(match.group(1))
 
 
 def render_report(report: Report) -> str:
@@ -183,8 +240,11 @@ __all__ = [
     "FILE_CLOSE",
     "FILE_OPEN",
     "detect_marker_collision",
+    "format_step",
+    "parse_step_arg",
     "parse_step_message",
     "render_report",
+    "report_sort_key",
     "summarize_check",
     "summarize_deviation",
     "validate_paths",

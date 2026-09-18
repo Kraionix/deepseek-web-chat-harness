@@ -8,7 +8,9 @@ filesystem and git ports go through their real adapters.
 `project_root` gives every test a real git repository with a first
 commit. `harness_root` extends it with `.harness/config.toml` and a
 fresh state. `deps` wraps a `project_root` in a `Deps` with the
-three fakes wired in.
+three fakes wired in. `broken_deps` is `deps` with a git port whose
+`commit_all` always raises: used by tests that assert a lifecycle
+command restores state when the commit fails.
 """
 
 from __future__ import annotations
@@ -23,14 +25,19 @@ from dwch.adapters.git import CliGit
 from dwch.adapters.process import SubprocessRunner
 from dwch.application.deps import Deps
 from dwch.application.state import initial_state, save_state
-from tests.fakes import InMemoryClipboard, InMemoryCounter, InMemoryProcess
+from tests.fakes import (
+    CommitFails,
+    InMemoryClipboard,
+    InMemoryCounter,
+    InMemoryProcess,
+)
 
 # Minimal config that `load_config` accepts. `verify.commands` and
 # `verify.planning_commands` are empty so tests never shell out to
 # ruff; a test that wants a command registers it in `InMemoryProcess`.
 #
 # The 0.3.0 format replaces `bootstrap.recent_reports` with
-# `bootstrap.reports_current_phase`.
+# `bootstrap.reports_current_phase`. 0.3.1 removes `paths.phases`.
 MINIMAL_CONFIG = """\
 [harness]
 version = "0.3.0"
@@ -40,7 +47,6 @@ name = "test-project"
 
 [paths]
 steps = "steps"
-phases = "phases"
 
 [context]
 essential = []
@@ -140,4 +146,23 @@ def deps(project_root: Path) -> Deps:
         git=CliGit(SubprocessRunner()),
         counter=InMemoryCounter(),
         project_root=project_root,
+    )
+
+
+@pytest.fixture
+def broken_deps(deps: Deps) -> Deps:
+    """`deps` with a git port whose `commit_all` always raises.
+
+    Every other method is the real implementation: reads
+    (`is_clean`, `status_short`, `try_head`, `last_commit_subject`)
+    behave as they do in production. Only the write that the
+    lifecycle commands perform is broken.
+    """
+    return Deps(
+        fs=deps.fs,
+        clipboard=deps.clipboard,
+        process=deps.process,
+        git=CommitFails(SubprocessRunner()),
+        counter=deps.counter,
+        project_root=deps.project_root,
     )

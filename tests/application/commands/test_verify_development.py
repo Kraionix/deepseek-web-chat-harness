@@ -3,6 +3,9 @@
 Updated for 0.3.0: the planning phase that produces the frozen
 roadmap now closes with a summary, so `_plan_and_freeze` writes one
 before calling `close --freeze`.
+
+Updated for 0.3.1: added coverage for the `roadmap-missing` check
+and for the state-restore path when `commit_all` fails.
 """
 
 from __future__ import annotations
@@ -105,3 +108,82 @@ def test_development_bad_step_argument(harness_root: Path, deps) -> None:
     """A non-integer step argument exits 2."""
     _plan_and_freeze(harness_root, deps)
     assert cmd_verify(Namespace(step="abc", clipboard=False), deps) == 2
+
+
+def test_development_single_digit_step_matches_two_digit(
+    harness_root: Path, deps
+) -> None:
+    """`apply 1` + `verify 1` resolve to the same step file."""
+    _plan_and_freeze(harness_root, deps)
+    deps.clipboard.text = "<<<FILE:src/app.py>>>\n" + _GREET + "<<<END>>>\n"
+    assert cmd_apply(Namespace(step="1", from_file=None), deps) == 0
+    assert cmd_verify(Namespace(step="1", clipboard=False), deps) == 0
+    state = load_state(deps.fs, harness_root)
+    assert state.roadmap_step == 1
+
+
+def test_development_frozen_but_missing_roadmap(
+    harness_root: Path, deps, capsys
+) -> None:
+    """state.frozen with no roadmap file fails with `roadmap-missing`."""
+    _plan_and_freeze(harness_root, deps)
+    (harness_root / ".harness" / "roadmap.toml").unlink()
+
+    deps.clipboard.text = "<<<FILE:src/app.py>>>\n" + _GREET + "<<<END>>>\n"
+    assert cmd_apply(Namespace(step="01", from_file=None), deps) == 0
+    rc = cmd_verify(Namespace(step="01", clipboard=False), deps)
+    assert rc == 1
+
+    report = (harness_root / "steps" / "dev" / "report-01.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "roadmap-missing" in report
+    # The roadmap check is required, so the commit is skipped.
+    assert "not committed" in report
+
+
+def test_development_commit_failure_restores_state(
+    harness_root: Path, deps, broken_deps, capsys
+) -> None:
+    """A failed commit leaves state at the pre-verify values."""
+    _plan_and_freeze(harness_root, deps)
+    deps.clipboard.text = "<<<FILE:src/app.py>>>\n" + _GREET + "<<<END>>>\n"
+    assert cmd_apply(Namespace(step="01", from_file=None), deps) == 0
+
+    before = load_state(deps.fs, harness_root)
+    rc = cmd_verify(Namespace(step="01", clipboard=False), broken_deps)
+    assert rc != 0
+
+    after = load_state(deps.fs, harness_root)
+    assert after.roadmap_step == before.roadmap_step
+    assert after.current_step == before.current_step
+    assert after.last_commit_date == before.last_commit_date
+
+    err = capsys.readouterr().err
+    assert "commit failed" in err
+    assert "state was restored" in err
+
+    # The report is still written.
+    report = (harness_root / "steps" / "dev" / "report-01.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "not committed" in report
+
+
+def test_development_rejects_step_file_with_unsafe_path(
+    harness_root: Path, deps
+) -> None:
+    """A hand-edited step file with `..` is rejected by verify."""
+    _plan_and_freeze(harness_root, deps)
+    deps.clipboard.text = "<<<FILE:src/app.py>>>\n" + _GREET + "<<<END>>>\n"
+    assert cmd_apply(Namespace(step="01", from_file=None), deps) == 0
+
+    # Hand-edit the on-disk step file to include a path that `apply`
+    # would have refused.
+    step_file = harness_root / "steps" / "dev" / "step-01.txt"
+    step_file.write_text(
+        "<<<FILE:src/app.py>>>\n" + _GREET + "<<<END>>>\n"
+        "<<<FILE:../escape.py>>>\nx\n<<<END>>>\n",
+        encoding="utf-8",
+    )
+    assert cmd_verify(Namespace(step="01", clipboard=False), deps) == 2

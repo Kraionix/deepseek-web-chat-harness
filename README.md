@@ -5,7 +5,7 @@ where the model has no read access, no write access, no execution, and
 no way to iterate. The user is the sole I/O channel: they copy messages
 from the chat, run commands, and paste results back.
 
-`dwch` (the CLI) closes that gap with eleven commands covering the full
+`dwch` (the CLI) closes that gap with twelve commands covering the full
 session lifecycle: bootstrap the context, apply a step's files, verify
 the result, commit, read a file on demand, roll back, start a new phase,
 close the session. It also counts tokens precisely (using DeepSeek's
@@ -123,7 +123,12 @@ its artifacts. The tokenizer file is local cache.
 it. `.harness/roadmap.lock` appears only after `close --freeze`.
 `.harness/summaries/` appears after the first `apply summary`.
 
-## The eleven commands
+`dwch init --force` regenerates the files the harness owns and can
+safely rebuild: `config.toml`, the shipped templates, and the
+tokenizer cache. It does not touch `state.toml`, `.harness/.gitignore`,
+or `.harness/handoff.md`, because those carry session-local state.
+
+## The twelve commands
 
 | Command | Purpose |
 |---|---|
@@ -143,6 +148,9 @@ it. `.harness/roadmap.lock` appears only after `close --freeze`.
 `apply` is one command with two forms. `apply NN` writes a step's
 files; `apply summary` writes the phase summary. Both accept
 `--from-file`.
+
+A summary is written once. `apply summary` refuses to overwrite an
+existing file; if you need to rewrite one, delete it first.
 
 ## Lifecycle
 
@@ -171,3 +179,6 @@ The AI's reply for a phase summary is exactly one block:
 &lt;&lt;&lt;FILE:.harness/summaries/{phase}.md&gt;&gt;&gt;, with the
 summary text, closed by a line containing only
 &lt;&lt;&lt;END&gt;&gt;&gt;.
+
+Trailing whitespace after a marker line is tolerated: a line whose
+stripped form is the marker is recognized.

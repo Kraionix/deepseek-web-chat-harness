@@ -68,6 +68,18 @@ class CliGit:
         except GitError:
             return ""
 
+    def last_commit_subject(self, cwd: Path) -> str:
+        """Best-effort `log -1 --format=%s`; empty string on failure.
+
+        An empty repository has no commit to describe. Callers that
+        require a subject (only `rollback`) treat the empty string
+        as "cannot tell".
+        """
+        try:
+            return self._run(cwd, "log", "-1", "--format=%s").strip()
+        except GitError:
+            return ""
+
     def commit_all(self, cwd: Path, message: str) -> str:
         self._run(cwd, "add", "-A")
         self._run(cwd, "commit", "-m", message)

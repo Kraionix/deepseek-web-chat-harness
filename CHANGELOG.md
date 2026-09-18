@@ -3,6 +3,135 @@
 Follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-09-18
+
+Patch release. No format changes: `config.toml` and `state.toml`
+keep the `"0.3.0"` format version, and existing projects keep
+working after upgrading the package.
+
+### Fixed
+
+- **Malformed user TOML could crash four commands with a
+  traceback.** `roadmap.load`, `lock.load`, and `deviations.parse`
+  iterated list-typed fields without checking their shape. A string
+  where a list was expected produced an `AttributeError`, which is
+  not a `HarnessError` and was not caught. `dwch health`,
+  `dwch bootstrap`, `dwch verify`, and `dwch close --freeze` all
+  crashed on such a file. All three parsers now coerce through
+  `shared.toml.list_of_tables` / `list_of_strings` and raise their
+  own error type.
+- **`rollback` could roll back a lifecycle commit.**
+  `current_step` in a resumed development phase is greater than
+  zero, so the old guard (`current_step <= 0`) let `rollback` reset
+  past a `chore: start ... phase ...` or a `chore: close phase ...`
+  commit, taking the phase with it. `rollback` now checks the
+  subject line of `HEAD` and only accepts a commit whose subject
+  starts with `step `.
+- **Step filenames were inconsistent across commands.**
+  `apply 1` wrote `step-1.txt`, `verify 01` looked for
+  `step-01.txt`, and `deviations.load_step` always used
+  `step-01.toml`. A deviation written as `step-1.toml` was silently
+  ignored. Every command now goes through `format.format_step`.
+- **Reports were sorted lexicographically.** `report-2.txt` sorted
+  after `report-10.txt`; `[-n:]` picked the wrong "most recent"
+  reports. The sort key now extracts the numeric step.
+- **`dwch init --force` did not do what it promised.**
+  `_write_config` and `_write_templates` returned early when the
+  target existed, so a version-mismatch error that told the user to
+  run `init --force` could not be resolved that way. `--force` now
+  overwrites `config.toml` and the shipped templates, and
+  re-downloads the tokenizer instead of trusting a possibly
+  truncated cache. `state.toml`, `.harness/.gitignore`, and
+  `.harness/handoff.md` are still preserved.
+- **`dwch init` printed errors to stdout.** Two call sites in
+  `cmd_init` used plain `print`. They now write to stderr, matching
+  every other command.
+- **`dwch apply summary` overwrote existing summaries.**
+  `CONTRIBUTING.md` promised append-only behaviour. `_apply_summary`
+  now refuses to write when the target file exists.
+- **`handoff.ensure_metadata` accumulated stale blocks.** The
+  `partition`-based implementation left a stray `BEGIN` or `END`
+  marker in place when the AI produced only one of the two, and
+  did not handle duplicate markers. The regex-based version removes
+  every stray marker line and inserts a single fresh block.
+- **`rollback` wrote a second-precision timestamp.** Every other
+  command uses `state.now_iso`, which applies
+  `state.TIMESTAMP_TIMESPEC` (microseconds). All commands now share
+  the constant.
+- **Phase name validation missed control characters.**
+  `_INVALID_NAME_CHARS` did not include `\n`, `\t`, or other C0
+  control characters. A name such as `"a\nb"` passed and corrupted
+  `handoff.md` and `state.toml`. Validation moved to
+  `rules.phase_name_error`, which rejects any control character.
+- **`bootstrap` could report `(truncated)` without truncating.**
+  `_truncate` returned `truncated=True` unconditionally. It now
+  reports True only when at least one section was removed.
+- **`[-n:]` with `n == 0` returned the whole list.** Affected
+  `context._current_phase_reports`, `deviations.load_recent`, and
+  `deviations.summarize`. A config with
+  `bootstrap.reports_current_phase = 0` now shows none, as the
+  user asked.
+- **`lock.check` could read files outside the project.** A
+  hand-edited `roadmap.lock` with a `path = "../../etc/passwd"`
+  entry was read and hashed. Unsafe paths are now reported as
+  drift without being opened.
+- **`health` reported a failure for a git worktree.** A linked
+  worktree or a submodule has a `.git` file, not a directory.
+  `_check_git` now accepts either.
+- **`verify` could leave the tree dirty after a failed commit.**
+  State had already been saved and auto-deviations written. On
+  commit failure, state is now restored and the auto file removed;
+  the command exits 2 and the report still explains the checks.
+- **`close` could leave the tree dirty after a failed commit.**
+  Same pattern; state and the handoff block are restored and the
+  command exits 2.
+- **`new-phase` wrote `handoff.md` before saving state.** A
+  failure between the two left the handoff from the new phase and
+  the state from the old. The order is now state first, then
+  handoff, and a failed commit restores both.
+- **`verify` did not re-validate paths from the on-disk step file.**
+  A step message edited by hand after `apply` was parsed without
+  the path checks that `apply` applies. `validate_paths` runs
+  again.
+- **`verify` silently skipped roadmap checks when the file was
+  missing.** If `state.roadmap_frozen` was true but
+  `roadmap.toml` had been deleted, all roadmap checks were
+  skipped. A required `roadmap-missing` check now fails the step
+  and appears in the report.
+- **`read` mishandled absolute glob patterns.** `dwch read
+  "/tmp/*.py"` went through `Path.glob`, which does not support
+  absolute patterns. It now fails with one clear message.
+- **`module_map` lost parameter annotations and defaults.**
+  `def f(a: int, b: str = "x") -> None` rendered as
+  `def f(a, b) -> None`. The map now includes annotations,
+  positional defaults, and keyword-only defaults. Tuple targets
+  in `a, b = 1, 2` are also recognized.
+- **`config` had an unused `phases` key.** Removed from
+  `_DEFAULT_PATHS` and from the rendered config template.
+
+### Changed
+
+- `apply summary` is append-only and refuses to overwrite.
+- `apply`, `verify`, and `read` accept any positive integer step
+  number and canonicalize it.
+- `init --force` now overwrites `config.toml`, the templates, and
+  the tokenizer cache.
+- `init` uses a `User-Agent` header when downloading the tokenizer.
+- Step message parser tolerates trailing whitespace on marker
+  lines.
+- `context._task` strips the `harness:begin`/`harness:end` block
+  from the handoff before embedding it in the bootstrap: `header`
+  already shows the same values.
+- `context._recent_commits` catches `HarnessError`, not
+  `Exception`.
+- `adapters/clipboard.py` no longer imports `ClipboardError` for a
+  no-op re-export.
+- `README.md` and `session-protocol.md` say "twelve commands" to
+  match the README table.
+- `CONTRIBUTING.md` rewords the summary contract to match the code
+  and documents step-number canonicalization and the timestamp
+  invariant.
+
 ## [0.3.0] - 2026-09-18
 
 ### Added

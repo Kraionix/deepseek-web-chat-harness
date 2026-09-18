@@ -12,8 +12,6 @@ import platform
 import shutil
 import subprocess
 
-from ..shared.errors import ClipboardError
-
 
 class WindowsClipboard:
     """Clipboard access via PowerShell."""
@@ -177,10 +175,6 @@ def pick_clipboard():
     if system == "Linux":
         return LinuxClipboard()
     return NullClipboard()
-
-
-# Re-export for callers that catch the error explicitly.
-_ = ClipboardError
 
 
 __all__ = [

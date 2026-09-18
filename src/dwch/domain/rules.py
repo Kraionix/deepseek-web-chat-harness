@@ -31,6 +31,11 @@ _NON_SUBSTANTIVE_PREFIXES = (
 )
 _NON_SUBSTANTIVE_EXACT = (".harness/handoff.md",)
 
+# Characters that are unsafe in a directory name on any of the
+# supported platforms. Windows reserves them; POSIX would accept
+# them but the user's expectation is that a phase name is a slug.
+_PHASE_NAME_INVALID_CHARS = frozenset('<>:"|?*')
+
 
 def is_planning_phase(state: State) -> bool:
     """True when `state` belongs to a planning phase.
@@ -104,6 +109,38 @@ def has_blocker(deviations: list[Deviation]) -> bool:
     return any(d.type == DeviationType.BLOCKER for d in deviations)
 
 
+def phase_name_error(name: str) -> str | None:
+    """Return an error message if `name` is not a safe directory name.
+
+    A phase name becomes a directory under `steps/`, so it must not
+    contain path separators, parent references, characters that are
+    illegal on Windows, or any control character. The last rule is
+    stricter than `str.strip()` and `" " in name`: a name such as
+    `"a\\nb"` would create a directory with an embedded newline and
+    corrupt `.harness/handoff.md` and `.harness/state.toml`.
+    """
+    if not name:
+        return "phase name must be non-empty"
+    if name != name.strip():
+        return "phase name must not have leading or trailing whitespace"
+    for ch in name:
+        if ch.isspace() and ch != " ":
+            return "phase name must not contain tabs or newlines"
+        if ord(ch) < 0x20 or ord(ch) == 0x7F:
+            return "phase name must not contain control characters"
+    if " " in name:
+        return "phase name must not contain spaces"
+    if "/" in name or "\\" in name:
+        return "phase name must not contain path separators"
+    if name in {".", ".."}:
+        return "phase name must not be '.' or '..'"
+    bad = sorted(set(name) & _PHASE_NAME_INVALID_CHARS)
+    if bad:
+        joined = " ".join(repr(c) for c in bad)
+        return f"phase name contains invalid characters: {joined}"
+    return None
+
+
 def is_state_consistent(state: State) -> bool:
     """True when the state fields are internally coherent.
 
@@ -131,4 +168,5 @@ __all__ = [
     "is_state_consistent",
     "is_substantive",
     "is_unset_phase",
+    "phase_name_error",
 ]

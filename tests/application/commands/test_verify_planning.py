@@ -77,3 +77,20 @@ def test_planning_verify_bad_step_argument(harness_root: Path, deps) -> None:
     """A non-integer step argument exits 2."""
     _phase(harness_root, deps)
     assert cmd_verify(Namespace(step="abc", clipboard=False), deps) == 2
+
+
+def test_planning_verify_zero_step_argument(harness_root: Path, deps) -> None:
+    """`verify 0` exits 2."""
+    _phase(harness_root, deps)
+    _apply_roadmap(harness_root, deps, _ROADMAP_GOOD, ".harness/roadmap.toml")
+    assert cmd_verify(Namespace(step="0", clipboard=False), deps) == 2
+
+
+def test_planning_verify_single_digit_step(harness_root: Path, deps) -> None:
+    """`apply 1` + `verify 1` agree on the same step file."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = (
+        "<<<FILE:.harness/roadmap.toml>>>\n" + _ROADMAP_GOOD + "<<<END>>>\n"
+    )
+    assert cmd_apply(Namespace(step="1", from_file=None), deps) == 0
+    assert cmd_verify(Namespace(step="1", clipboard=False), deps) == 0

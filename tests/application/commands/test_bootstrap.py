@@ -7,6 +7,7 @@ from pathlib import Path
 
 from dwch.application.commands.bootstrap import cmd_bootstrap
 from dwch.application.commands.new_phase import cmd_new_phase
+from dwch.application.handoff import BEGIN, END
 from dwch.application.state import load_state, save_state, with_updates
 
 
@@ -25,12 +26,10 @@ def test_bootstrap_planning(harness_root: Path, deps, capsys) -> None:
     assert "section: protocol" in out
 
 
-def test_bootstrap_development_has_current_step(
+def test_bootstrap_development_has_header_and_progress(
     harness_root: Path, deps, capsys
 ) -> None:
-    """A development bootstrap shows the current roadmap step."""
-    # A development phase without a roadmap still resolves to a
-    # bootstrap that at least includes the header.
+    """A development bootstrap (no roadmap) still has the header and progress."""
     cmd_new_phase(Namespace(name="d", kind="development"), deps)
     assert cmd_bootstrap(_args(), deps) == 0
     out = capsys.readouterr().out
@@ -85,3 +84,30 @@ def test_bootstrap_reports_scoped_to_current_phase(
     out = capsys.readouterr().out
     assert "current-phase-body" in out
     assert "other-phase-body" not in out
+
+
+def test_bootstrap_strips_harness_block_from_task(
+    harness_root: Path, deps, capsys
+) -> None:
+    """The `harness:begin`/`harness:end` block is stripped from `task`."""
+    cmd_new_phase(Namespace(name="p", kind="planning"), deps)
+    # The template already contains a block. After new-phase + ensure_metadata
+    # the block is present. It must not appear in the task section body:
+    # the header already shows the same fields.
+    handoff_text = (harness_root / ".harness" / "handoff.md").read_text(
+        encoding="utf-8"
+    )
+    # Sanity check: template carries both markers.
+    assert BEGIN in handoff_text
+    assert END in handoff_text
+
+    assert cmd_bootstrap(_args(), deps) == 0
+    out = capsys.readouterr().out
+    # The header section legitimately prints phase and kind, but the raw
+    # `harness:begin` marker is not part of the task section.
+    # Locate the task section body and check the marker is not there.
+    task_start = out.index("<!-- section: task -->")
+    task_end = out.index("<!-- section:", task_start + 1)
+    task_body = out[task_start:task_end]
+    assert BEGIN not in task_body
+    assert END not in task_body

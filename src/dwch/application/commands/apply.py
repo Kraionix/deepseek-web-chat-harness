@@ -17,7 +17,13 @@ diagnosable without asking the AI to re-send.
 A summary's raw message is saved to `steps/{phase}/summary.txt`,
 and the single file block is written to
 `.harness/summaries/{phase}.md`. The summary does not modify state;
-`dwch close` records it later.
+`dwch close` records it later. A summary is never overwritten: once
+written, only the user can remove it, and `close` will refuse to
+run twice on the same phase anyway.
+
+Step filenames go through `format_step`, so `apply 1` and
+`apply 01` write the same `step-01.txt`, matching what `verify 01`
+looks for.
 """
 
 from __future__ import annotations
@@ -33,6 +39,8 @@ from ..config import load_config
 from ..deps import Deps
 from ..format import (
     detect_marker_collision,
+    format_step,
+    parse_step_arg,
     parse_step_message,
     validate_paths,
 )
@@ -54,12 +62,9 @@ def cmd_apply(args: Namespace, deps: Deps) -> int:
 def _apply_step(args: Namespace, deps: Deps) -> int:
     """Apply a numbered step. Returns 0, 1, or 2."""
     try:
-        int(args.step)
-    except (TypeError, ValueError):
-        print(
-            f"error: step must be an integer or 'summary', got {args.step!r}",
-            file=sys.stderr,
-        )
+        step_num = parse_step_arg(args.step)
+    except FormatError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
     try:
@@ -77,6 +82,7 @@ def _apply_step(args: Namespace, deps: Deps) -> int:
         )
         return 2
 
+    tag = format_step(step_num)
     steps_root = deps.project_root / config.paths.get("steps", "steps")
     steps_dir = steps_root / state.current_phase
     step_text = _read_message(args, deps)
@@ -88,7 +94,7 @@ def _apply_step(args: Namespace, deps: Deps) -> int:
 
     deps.fs.mkdir(steps_dir, parents=True)
     _ensure_steps_gitignore(deps, steps_root)
-    step_file = steps_dir / f"step-{args.step}.txt"
+    step_file = steps_dir / f"step-{tag}.txt"
     deps.fs.write_text(step_file, step_text)
 
     try:
@@ -116,7 +122,7 @@ def _apply_step(args: Namespace, deps: Deps) -> int:
     except HarnessError as exc:
         _rollback_written(deps, written)
         print(f"error writing files: {exc}", file=sys.stderr)
-        print("partial writes were rolled back via git", file=sys.stderr)
+        print("partial writes were rolled back", file=sys.stderr)
         return 2
 
     # Invariant: after a step, the harness block in handoff.md is
@@ -125,7 +131,7 @@ def _apply_step(args: Namespace, deps: Deps) -> int:
     ensure_metadata(deps.fs, deps.project_root, state)
 
     log_lines = [
-        f"step:  {args.step}",
+        f"step:  {tag}",
         f"phase: {state.current_phase}",
         f"saved: {step_file.relative_to(deps.project_root).as_posix()}",
         f"files: {len(written)}",
@@ -134,7 +140,7 @@ def _apply_step(args: Namespace, deps: Deps) -> int:
         verb = "overwrote" if existed else "wrote"
         log_lines.append(f"  {verb} {path}")
     log_text = "\n".join(log_lines) + "\n"
-    deps.fs.write_text(steps_dir / f"apply-{args.step}.log", log_text)
+    deps.fs.write_text(steps_dir / f"apply-{tag}.log", log_text)
     sys.stdout.write(log_text)
     return 0
 
@@ -144,7 +150,8 @@ def _apply_summary(args: Namespace, deps: Deps) -> int:
 
     Pre:  an active phase exists; the clipboard or `--from-file`
           holds exactly one file block whose normalized path equals
-          `.harness/summaries/{phase}.md`.
+          `.harness/summaries/{phase}.md`; no summary for this phase
+          exists on disk yet.
     Post: the summary file and the raw message are on disk. State is
           unchanged; `dwch close` records the summary afterwards.
     Raises: never. Errors are printed and converted into an exit
@@ -198,11 +205,20 @@ def _apply_summary(args: Namespace, deps: Deps) -> int:
         )
         return 1
 
+    summary_path = deps.project_root / expected
+    if deps.fs.exists(summary_path):
+        print(
+            f"error: summary already exists at {expected}. "
+            "Summaries are append-only; delete the file first if you "
+            "need to rewrite it.",
+            file=sys.stderr,
+        )
+        return 2
+
     deps.fs.mkdir(steps_dir, parents=True)
     _ensure_steps_gitignore(deps, steps_root)
     deps.fs.write_text(steps_dir / "summary.txt", summary_text)
 
-    summary_path = deps.project_root / expected
     deps.fs.mkdir(summary_path.parent, parents=True)
     deps.fs.write_text(summary_path, specs[0].content)
 

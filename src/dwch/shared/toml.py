@@ -1,9 +1,14 @@
-"""Minimal TOML serialization helpers.
+"""Minimal TOML serialization and coercion helpers.
 
-Only the parts the harness actually needs: escaping strings for
-basic-string syntax. There is no full TOML writer here, and no
-plan to add one — the two call sites (`lock.render`,
-`deviations.render`) both write a small, known-shape document.
+Only the parts the harness actually needs:
+
+- `escape_basic_string` for writing TOML strings.
+- `list_of_tables` / `list_of_strings` for coercing user-edited
+  TOML into a verified shape before it is iterated.
+
+There is no full TOML writer here, and no plan to add one — the
+two render sites (`lock.render`, `deviations.render`) both write a
+small, known-shape document.
 """
 
 from __future__ import annotations
@@ -45,4 +50,56 @@ def escape_basic_string(value: str) -> str:
     return "".join(parts)
 
 
-__all__ = ["escape_basic_string"]
+def list_of_tables(value: object, label: str) -> list[dict]:
+    """Return `value` as a list of dicts, or raise `ValueError`.
+
+    Pre:  `value` is any Python object, typically whatever
+          `tomllib` produced for a TOML array-of-tables key.
+    Post: a list of dicts.
+    Raises: `ValueError` when `value` is not a list, or when any
+          item is not a table. The message names `label` and the
+          actual type, so callers can re-wrap it in their own error
+          type without losing the diagnosis.
+
+    Iterating directly over a string (the previous behaviour) yields
+    characters, not tables, and the next `item.get(...)` call raises
+    `AttributeError`. Coercion here turns that into a clear error.
+    """
+    if not isinstance(value, list):
+        raise ValueError(
+            f"{label}: expected a list of tables, got {type(value).__name__}"
+        )
+    out: list[dict] = []
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{label}[{i}]: expected a table, got {type(item).__name__}"
+            )
+        out.append(item)
+    return out
+
+
+def list_of_strings(value: object, label: str) -> list[str]:
+    """Return `value` as a list of strings, or raise `ValueError`.
+
+    Pre:  `value` is any Python object.
+    Post: a list of strings.
+    Raises: `ValueError` when `value` is not a list, or when any
+          item is not a string. A bare string input is rejected
+          rather than split into characters.
+    """
+    if not isinstance(value, list):
+        raise ValueError(
+            f"{label}: expected a list of strings, got {type(value).__name__}"
+        )
+    out: list[str] = []
+    for i, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(
+                f"{label}[{i}]: expected a string, got {type(item).__name__}"
+            )
+        out.append(item)
+    return out
+
+
+__all__ = ["escape_basic_string", "list_of_strings", "list_of_tables"]

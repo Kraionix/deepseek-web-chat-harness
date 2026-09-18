@@ -35,6 +35,29 @@ def test_apply_writes_files(harness_root: Path, deps) -> None:
     assert (harness_root / "steps" / "p1" / "step-01.txt").is_file()
 
 
+def test_apply_canonicalizes_single_digit_step(harness_root: Path, deps) -> None:
+    """`apply 1` writes `step-01.txt`, matching what `verify 01` looks for."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = _STEP
+    assert cmd_apply(_args("1"), deps) == 0
+    assert (harness_root / "steps" / "p1" / "step-01.txt").is_file()
+
+
+def test_apply_canonicalizes_three_digit_step(harness_root: Path, deps) -> None:
+    """`apply 001` writes `step-01.txt`."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = _STEP
+    assert cmd_apply(_args("001"), deps) == 0
+    assert (harness_root / "steps" / "p1" / "step-01.txt").is_file()
+
+
+def test_apply_rejects_zero_step(harness_root: Path, deps) -> None:
+    """`apply 0` exits 2."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = _STEP
+    assert cmd_apply(_args("0"), deps) == 2
+
+
 def test_apply_no_phase(harness_root: Path, deps) -> None:
     """Without an active phase, `apply` refuses."""
     deps.clipboard.text = _STEP
@@ -107,6 +130,20 @@ def test_apply_summary_ok(harness_root: Path, deps) -> None:
         encoding="utf-8"
     )
     assert body == "phase one done\n"
+
+
+def test_apply_summary_refuses_overwrite(harness_root: Path, deps, capsys) -> None:
+    """A second summary for the same phase is refused."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = "<<<FILE:.harness/summaries/p1.md>>>\nfirst\n<<<END>>>\n"
+    assert cmd_apply(_summary_args(), deps) == 0
+    deps.clipboard.text = "<<<FILE:.harness/summaries/p1.md>>>\nsecond\n<<<END>>>\n"
+    assert cmd_apply(_summary_args(), deps) == 2
+    body = (harness_root / ".harness" / "summaries" / "p1.md").read_text(
+        encoding="utf-8"
+    )
+    assert body == "first\n"
+    assert "already exists" in capsys.readouterr().err
 
 
 def test_apply_summary_wrong_path(harness_root: Path, deps) -> None:

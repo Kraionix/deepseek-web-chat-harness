@@ -20,7 +20,6 @@ from .ports import FilesystemPort
 # "empty" config means.
 _DEFAULT_PATHS = {
     "steps": "steps",
-    "phases": "phases",
 }
 
 _DEFAULT_CONTEXT = {
@@ -150,7 +149,6 @@ name = "{project_name}"
 
 [paths]
 steps = "steps"
-phases = "phases"
 
 [context]
 # Files copied verbatim into the bootstrap.

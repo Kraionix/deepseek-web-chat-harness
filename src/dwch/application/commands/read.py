@@ -11,7 +11,7 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
-from ...shared.errors import FilesystemError, HarnessError
+from ...shared.errors import FilesystemError, FormatError, HarnessError
 from ..config import load_config
 from ..deps import Deps
 from ..format import FILE_CLOSE, FILE_OPEN
@@ -25,12 +25,17 @@ def cmd_read(args: Namespace, deps: Deps) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    paths = _resolve_paths(args.path, deps)
+    try:
+        paths = _resolve_paths(args.path, deps)
+    except FormatError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if not paths:
         print(f"error: no files match {args.path!r}", file=sys.stderr)
         return 2
 
     parts: list[str] = []
+    oversize: list[tuple[str, int]] = []
     for path in paths:
         try:
             text = deps.fs.read_text(path)
@@ -39,6 +44,8 @@ def cmd_read(args: Namespace, deps: Deps) -> int:
             continue
         rel = path.relative_to(deps.project_root).as_posix()
         tokens = deps.counter.count(text)
+        if tokens > config.read_max_tokens:
+            oversize.append((rel, tokens))
         parts.append(f"<!-- {rel} ({tokens} tokens) -->")
         parts.append(f"{FILE_OPEN}{rel}>>>")
         parts.append(text.rstrip("\n"))
@@ -47,17 +54,11 @@ def cmd_read(args: Namespace, deps: Deps) -> int:
 
     output = "\n".join(parts)
 
-    # Warn if any single file exceeds the configured threshold.
-    for path in paths:
-        try:
-            size = deps.counter.count(deps.fs.read_text(path))
-        except HarnessError:
-            continue
-        if size > config.read_max_tokens:
-            print(
-                f"warning: {path.name} is {size} tokens (>{config.read_max_tokens})",
-                file=sys.stderr,
-            )
+    for rel, tokens in oversize:
+        print(
+            f"warning: {rel} is {tokens} tokens (>{config.read_max_tokens})",
+            file=sys.stderr,
+        )
 
     if args.clipboard:
         if deps.clipboard.write(output):
@@ -73,14 +74,22 @@ def _resolve_paths(pattern: str, deps: Deps) -> list[Path]:
     """Resolve one argument to a list of files.
 
     If the argument contains a glob wildcard, expand it. If it names
-    a directory, list its `.py` and `.md` files. Otherwise treat it
-    as a single path.
+    a directory, list its `.py`, `.md`, and `.toml` files. Otherwise
+    treat it as a single path.
+
+    An absolute glob pattern is rejected with `FormatError` rather
+    than silently expanded or silently ignored: `Path.glob` does not
+    support absolute patterns and its behaviour differs between
+    Python versions. The caller gets one clear message instead of
+    "no files match", which would point at the wrong cause.
     """
     p = Path(pattern)
+    if any(ch in pattern for ch in "*?["):
+        if p.is_absolute() or pattern.startswith(("/", "\\")):
+            raise FormatError(f"absolute glob patterns are not supported: {pattern!r}")
+        return sorted(deps.fs.glob(deps.project_root, pattern))
     if not p.is_absolute():
         p = deps.project_root / p
-    if any(ch in pattern for ch in "*?["):
-        return sorted(deps.fs.glob(deps.project_root, pattern))
     if deps.fs.is_dir(p):
         files = deps.fs.listdir(p)
         return sorted(f for f in files if f.suffix in (".py", ".md", ".toml"))

@@ -114,3 +114,50 @@ def test_close_twice_refused(harness_root: Path, deps, capsys) -> None:
     assert cmd_close(_args(), deps) == 0
     assert cmd_close(_args(), deps) == 2
     assert "already closed" in capsys.readouterr().err
+
+
+def test_close_commit_failure_restores_state(
+    harness_root: Path, deps, broken_deps, capsys
+) -> None:
+    """A failed commit leaves state at the pre-close values."""
+    cmd_new_phase(Namespace(name="dev", kind="development"), deps)
+    _apply_summary(deps, "dev")
+    before = load_state(deps.fs, harness_root)
+
+    rc = cmd_close(Namespace(tag=False, freeze=False), broken_deps)
+    assert rc == 2
+
+    after = load_state(deps.fs, harness_root)
+    assert after.last_closed == before.last_closed
+    assert after.summary_phase == before.summary_phase
+    assert after.summary_written_at == before.summary_written_at
+
+    err = capsys.readouterr().err
+    assert "commit failed" in err
+    assert "state was restored" in err
+    assert "was not closed" in err
+
+
+def test_close_tag_uses_seconds(harness_root: Path, deps) -> None:
+    """A `--tag` close produces a tag with second resolution."""
+    import subprocess
+
+    cmd_new_phase(Namespace(name="dev", kind="development"), deps)
+    _apply_summary(deps, "dev")
+    assert cmd_close(Namespace(tag=True, freeze=False), deps) == 0
+
+    tags = subprocess.run(
+        ["git", "tag", "-l"],
+        cwd=harness_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    session_tags = [t for t in tags if t.startswith("session-")]
+    assert len(session_tags) == 1
+    suffix = session_tags[0][len("session-") :]
+    # Format: YYYYMMDD-HHMMSS → 8 digits, dash, 6 digits.
+    assert len(suffix) == 15
+    assert suffix[8] == "-"
+    assert suffix[:8].isdigit()
+    assert suffix[9:].isdigit()

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from dataclasses import replace
 from pathlib import Path
 
-from dwch.application.commands.health import cmd_health
+from dwch.application.commands.health import _check_git, cmd_health
 from dwch.application.state import load_state, save_state, with_updates
 
 
@@ -14,6 +15,20 @@ def _preseed_tokenizer(root: Path) -> None:
     data = root / ".harness" / "data"
     data.mkdir(parents=True, exist_ok=True)
     (data / "deepseek_tokenizer.json").write_bytes(b"{}")
+
+
+def _isolated_root(tmp_path: Path, deps) -> object:
+    """Return a `Deps` whose `project_root` is a fresh, git-free subdir.
+
+    `tmp_path` in a test is the *same* directory as `project_root`:
+    both are the per-test `tmp_path`. So `tmp_path` already contains
+    the `.git` created by the `project_root` fixture. To exercise the
+    "no `.git` here" branches of `_check_git`, the test must point
+    `Deps` at a subdirectory that was never initialized as a repo.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    return replace(deps, project_root=workdir)
 
 
 def test_health_reports_missing_tokenizer(harness_root: Path, deps, capsys) -> None:
@@ -64,3 +79,32 @@ def test_health_reports_missing_summary_file(harness_root: Path, deps, capsys) -
     assert "file missing" in out
     # The summary check is non-critical.
     assert rc == 0
+
+
+def test_check_git_dot_git_file(tmp_path: Path, deps) -> None:
+    """A `.git` file (worktree, submodule) is not reported as missing.
+
+    The `.git` entry may be a directory (common case) or a file
+    (linked worktree, submodule). Both are valid git repositories.
+    Only a missing entry is a failure. This test asserts the `git`
+    check does not report the worktree case as "no .git".
+    """
+    other = _isolated_root(tmp_path, deps)
+    (other.project_root / ".git").write_text("gitdir: /nonexistent\n", encoding="utf-8")
+
+    name, _ok, detail, _critical = _check_git(other)
+    assert name == "git"
+    # The `.git` presence check passes; the git command may then
+    # fail because the worktree pointer is broken, but that is a
+    # different message.
+    assert "no .git directory or file" not in detail
+
+
+def test_check_git_missing_dot_git(tmp_path: Path, deps) -> None:
+    """A missing `.git` entry is still a failure."""
+    other = _isolated_root(tmp_path, deps)
+    name, ok, detail, critical = _check_git(other)
+    assert name == "git"
+    assert ok is False
+    assert critical is True
+    assert "no .git" in detail

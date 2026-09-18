@@ -7,7 +7,9 @@ against the lock and reports any drift as a non-required check.
 
 All paths inside the lock are stored relative to the project root,
 using forward slashes, so the file is portable across machines and
-platforms.
+platforms. `check` re-validates them on read: a lock edited by
+hand to contain `../../etc/passwd` is reported as a problem rather
+than read.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from pathlib import Path
 
 from ..domain.models import Lock, LockEntry
 from ..shared.errors import LockError
-from ..shared.toml import escape_basic_string
+from ..shared.toml import escape_basic_string, list_of_tables
 from .ports import FilesystemPort
 from .roadmap import sha256
 
@@ -66,7 +68,8 @@ def write(
 def load(fs: FilesystemPort, path: Path) -> Lock | None:
     """Return the parsed lock at `path`, or None if it does not exist.
 
-    Raises: `LockError` if the file exists but is malformed.
+    Raises: `LockError` if the file exists but is malformed, or if
+          `[[architecture]]` is not a list of tables.
     """
     if not fs.exists(path):
         return None
@@ -77,9 +80,15 @@ def load(fs: FilesystemPort, path: Path) -> Lock | None:
     section = data.get("lock")
     if not isinstance(section, dict):
         raise LockError(f"{path}: missing [lock] section")
+    try:
+        arch_raw = list_of_tables(
+            data.get("architecture", []), f"{path}: [[architecture]]"
+        )
+    except ValueError as exc:
+        raise LockError(str(exc)) from exc
     entries = tuple(
         LockEntry(path=str(e.get("path", "")), sha256=str(e.get("sha256", "")))
-        for e in data.get("architecture", [])
+        for e in arch_raw
     )
     return Lock(
         at=str(section.get("at", "")),
@@ -102,9 +111,12 @@ def check(
 
     A path is reported if it is missing, present in the lock but not
     in the current set, present in the current set but not in the
-    lock, or has a different SHA-256. An empty list means the frozen
-    state matches. Returned paths are relative to `project_root`,
-    matching the lock format.
+    lock, or has a different SHA-256. A path from the lock that is
+    absolute or contains `..` is reported without being read: a
+    hand-edited lock must not cause the harness to read files
+    outside the project. An empty list means the frozen state
+    matches. Returned paths are relative to `project_root`, matching
+    the lock format.
     """
     problems: list[str] = []
 
@@ -119,6 +131,9 @@ def check(
     current = {_relative(p, project_root): p for p in architecture_paths}
 
     for rel, expected in locked.items():
+        if _bad_relative_path(rel):
+            problems.append(rel)
+            continue
         p = project_root / rel
         if not fs.exists(p):
             problems.append(rel)
@@ -169,6 +184,18 @@ def _relative(path: Path, project_root: Path) -> str:
         raise LockError(
             f"path is outside project root: {path} (root={project_root})"
         ) from exc
+
+
+def _bad_relative_path(value: str) -> bool:
+    """True when `value` is not a safe relative path.
+
+    Used by `check` to refuse to read a file that a hand-edited
+    lock points to outside the project.
+    """
+    if not value or value.startswith(("/", "\\")):
+        return True
+    p = Path(value)
+    return p.is_absolute() or ".." in p.parts
 
 
 __all__ = ["check", "load", "render", "write"]

@@ -9,7 +9,7 @@ import pytest
 
 from dwch.adapters.filesystem import LocalFilesystem
 from dwch.application import lock as lm
-from dwch.domain.models import Lock
+from dwch.domain.models import Lock, LockEntry
 from dwch.shared.errors import LockError
 
 _FS = LocalFilesystem()
@@ -63,6 +63,24 @@ def test_load_missing_section(tmp_path: Path) -> None:
     p = tmp_path / "x.lock"
     p.write_text("x = 1\n", encoding="utf-8")
     with pytest.raises(LockError, match="missing \\[lock\\]"):
+        lm.load(_FS, p)
+
+
+def test_load_architecture_string_raises(tmp_path: Path) -> None:
+    """A string `architecture` field is a `LockError`, not an `AttributeError`.
+
+    The `architecture` key must sit at the TOML top level, before
+    `[lock]` opens a table. Written after `[lock]`, it would be a
+    key inside that table, and `load` would not see it.
+    """
+    p = tmp_path / "x.lock"
+    p.write_text(
+        'architecture = "abc"\n\n'
+        '[lock]\nat = ""\nphase = ""\ncommit = ""\nversion = 1\n'
+        'roadmap_sha256 = ""\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(LockError, match="expected a list of tables"):
         lm.load(_FS, p)
 
 
@@ -155,6 +173,33 @@ def test_check_detects_extra_file(tmp_path: Path) -> None:
     extra = tmp_path / "docs" / "extra.md"
     extra.write_text("E\n", encoding="utf-8")
     assert "docs/extra.md" in lm.check(_FS, lock, tmp_path, roadmap, [*arch, extra])
+
+
+def test_check_rejects_unsafe_path(tmp_path: Path) -> None:
+    """A hand-edited lock with `..` is reported, not read."""
+    roadmap, lock_path, arch = _setup(tmp_path)
+    lock = lm.write(
+        _FS,
+        lock_path,
+        tmp_path,
+        roadmap,
+        arch,
+        at="",
+        phase="",
+        commit="",
+        version=1,
+    )
+    # Hand-edit the lock to point at a file outside the project.
+    evil = Lock(
+        at=lock.at,
+        phase=lock.phase,
+        commit=lock.commit,
+        version=lock.version,
+        roadmap_sha256=lock.roadmap_sha256,
+        architecture=(LockEntry(path="../../etc/passwd", sha256="deadbeef"),),
+    )
+    problems = lm.check(_FS, evil, tmp_path, roadmap, arch)
+    assert "../../etc/passwd" in problems
 
 
 def test_render_escapes_strings() -> None:

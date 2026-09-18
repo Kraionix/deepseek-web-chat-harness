@@ -32,7 +32,21 @@ _STATE_FORMAT_VERSION = "0.3.0"
 # same wall-clock second must still be distinguishable. Second
 # resolution is not enough: `close` followed immediately by
 # `new-phase` collides.
-_TIMESTAMP_TIMESPEC = "microseconds"
+#
+# Public so that every command calls `now_iso()` rather than
+# re-importing the constant. Drift between commands is the class of
+# bug the constant exists to prevent.
+TIMESTAMP_TIMESPEC = "microseconds"
+
+
+def now_iso() -> str:
+    """Return the current UTC time as an ISO string.
+
+    Every lifecycle timestamp the harness writes goes through this
+    function, so the format is uniform and `TIMESTAMP_TIMESPEC` is
+    applied in one place.
+    """
+    return datetime.now(UTC).isoformat(timespec=TIMESTAMP_TIMESPEC)
 
 
 def load_state(fs: FilesystemPort, project_root: Path) -> State:
@@ -109,7 +123,6 @@ def save_state(fs: FilesystemPort, project_root: Path, state: State) -> None:
 
 def initial_state() -> State:
     """Return a fresh `State` for a newly-initialized project."""
-    now = datetime.now(UTC).isoformat(timespec=_TIMESTAMP_TIMESPEC)
     return State(
         harness_version=_STATE_FORMAT_VERSION,
         current_phase="unset",
@@ -121,7 +134,7 @@ def initial_state() -> State:
         roadmap_step=0,
         roadmap_frozen=False,
         rollback_count=0,
-        last_opened=now,
+        last_opened=now_iso(),
         last_closed="",
         summary_phase="",
         summary_written_at="",
@@ -205,8 +218,10 @@ def _render_state(state: State) -> str:
 
 
 __all__ = [
+    "TIMESTAMP_TIMESPEC",
     "initial_state",
     "load_state",
+    "now_iso",
     "save_state",
     "set_roadmap_frozen",
     "with_updates",

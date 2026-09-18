@@ -8,8 +8,10 @@ import pytest
 
 from dwch.adapters.filesystem import LocalFilesystem
 from dwch.application.state import (
+    TIMESTAMP_TIMESPEC,
     initial_state,
     load_state,
+    now_iso,
     save_state,
     set_roadmap_frozen,
     with_updates,
@@ -132,3 +134,17 @@ def test_initial_state_summary_is_empty() -> None:
     state = initial_state()
     assert state.summary_phase == ""
     assert state.summary_written_at == ""
+
+
+def test_now_iso_has_microseconds() -> None:
+    """`now_iso` uses the documented microsecond precision."""
+    value = now_iso()
+    # Microsecond ISO 8601: `...T...:...:... .NNNNNN+00:00`.
+    assert "." in value
+    fraction = value.split(".")[1].split("+")[0]
+    assert len(fraction) == 6
+
+
+def test_timestamp_timespec_is_microseconds() -> None:
+    """The constant matches the invariant documented in the module."""
+    assert TIMESTAMP_TIMESPEC == "microseconds"

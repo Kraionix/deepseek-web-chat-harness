@@ -38,3 +38,31 @@ def test_read_directory(harness_root: Path, deps, capsys) -> None:
     out = capsys.readouterr().out
     assert "a.py" in out
     assert "b.md" in out
+
+
+def test_read_absolute_glob_rejected(harness_root: Path, deps, capsys) -> None:
+    """An absolute glob pattern fails with a specific message."""
+    assert cmd_read(_args("/tmp/*.py"), deps) == 2
+    err = capsys.readouterr().err
+    assert "absolute glob" in err
+
+
+def test_read_oversize_warning_uses_rel_path(harness_root: Path, deps, capsys) -> None:
+    """The oversize warning names the relative path, not the basename."""
+    sub = harness_root / "pkg"
+    sub.mkdir()
+    # `InMemoryCounter` returns `len(text)`. Config max is 6000.
+    (sub / "big.py").write_text("x" * 7000, encoding="utf-8")
+    assert cmd_read(_args("pkg/big.py"), deps) == 0
+    err = capsys.readouterr().err
+    assert "pkg/big.py" in err
+
+
+def test_read_glob_still_works(harness_root: Path, deps, capsys) -> None:
+    """A relative glob pattern still expands."""
+    (harness_root / "a.py").write_text("a\n", encoding="utf-8")
+    (harness_root / "b.py").write_text("b\n", encoding="utf-8")
+    assert cmd_read(_args("*.py"), deps) == 0
+    out = capsys.readouterr().out
+    assert "a.py" in out
+    assert "b.py" in out

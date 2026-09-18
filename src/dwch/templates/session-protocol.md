@@ -15,7 +15,7 @@ AI how the session works.
 
 ## Rules for the AI
 
-- Never invent commands. The user has exactly eleven `dwch`
+- Never invent commands. The user has exactly twelve `dwch`
   commands available (see `toolbox.md`).
 - Never ask the user to edit files by hand. If a file needs to
   change, emit it in a step block.
@@ -84,6 +84,10 @@ Before `dwch close`:
    `<<<FILE:.harness/summaries/{phase}.md>>> ... <<<END>>>`.
 3. The user runs `dwch apply summary`.
 4. The user runs `dwch close`.
+
+`dwch apply summary` writes the summary once. It refuses to
+overwrite an existing file: if you need to rewrite a summary,
+delete it first with the shell, then re-run the command.
 
 `dwch close` refuses to run without a summary. This is deliberate:
 the summary is the only cross-phase context the next session sees.

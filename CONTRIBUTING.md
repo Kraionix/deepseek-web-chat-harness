@@ -59,11 +59,14 @@ Two documents carry intent across a phase boundary.
   `close`, `new-phase`, and `apply`; and everything outside it,
   owned by the AI. Never edit inside the block; the harness will
   overwrite it. A handoff without the markers is repaired by
-  `ensure_metadata`, which inserts the block at the top.
+  `ensure_metadata`, which inserts the block at the top. A handoff
+  with only one of the two markers, or with duplicate markers, is
+  also repaired: the stray marker lines are removed and a fresh
+  block is prepended.
 - **`.harness/summaries/{phase}.md`** — written by the AI at the
-  end of a phase via `dwch apply summary`. Append-only: a summary
-  is never overwritten by the harness. `dwch close` refuses to run
-  without one.
+  end of a phase via `dwch apply summary`. The harness refuses to
+  overwrite an existing summary; delete the file first if you need
+  to rewrite it. `dwch close` refuses to run without one.
 
 `state.summary_phase` and `state.summary_written_at` record the
 most recent summary. The bootstrap renders it as
@@ -88,6 +91,13 @@ Two invariants guard the transition:
 Both invariants are checked in a fixed order so a malformed state
 cannot be papered over by skipping a step.
 
+## Step numbers
+
+A step number is a positive integer. `1`, `01`, and `001` name the
+same step. Every command that builds a step filename goes through
+`format.format_step`, so `apply 1` and `verify 01` agree on
+`step-01.txt`. Deviations use the same two-digit form.
+
 ## Architecture invariants
 
 Do not break these without discussion:
@@ -103,3 +113,6 @@ Do not break these without discussion:
 - `apply` and `close` are atomic: validate everything before any
   write; rollback on partial failure.
 - `save_state` is atomic: write temp, then rename.
+- Lifecycle timestamps go through `state.now_iso`, which applies
+  `state.TIMESTAMP_TIMESPEC`. Do not call `datetime.now` directly
+  in a command.

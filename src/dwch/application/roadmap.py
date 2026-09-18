@@ -20,6 +20,7 @@ from ..domain.models import (
     State,
 )
 from ..shared.errors import RoadmapError
+from ..shared.toml import list_of_strings, list_of_tables
 from .ports import FilesystemPort
 
 
@@ -27,10 +28,13 @@ def load(fs: FilesystemPort, path: Path) -> Roadmap:
     """Parse a roadmap TOML file into a `Roadmap`.
 
     Pre:  `path` is the absolute path of a roadmap file.
-    Post: returns a `Roadmap` with `[meta]`, `[[interfaces]]`, and
-          `[[steps]]` populated.
-    Raises: `RoadmapError` on a missing file, malformed TOML, or a
-          missing required section.
+    Post: returns a `Roadmap` with `[meta]`, `[[steps]]`, and
+          `[[interfaces]]` populated. `[[interfaces]]` is optional
+          and yields an empty tuple when absent.
+    Raises: `RoadmapError` on a missing file, malformed TOML, a
+          missing required section, or a list-typed field whose
+          shape is wrong (a string where a list is expected, and so
+          on).
     """
     if not fs.exists(path):
         raise RoadmapError(f"roadmap not found: {path}")
@@ -45,6 +49,8 @@ def load(fs: FilesystemPort, path: Path) -> Roadmap:
         raise RoadmapError(f"{path}: missing [[steps]] section")
 
     meta_raw = data["meta"]
+    if not isinstance(meta_raw, dict):
+        raise RoadmapError(f"{path}: [meta] must be a table")
     meta = RoadmapMeta(
         version=int(meta_raw.get("version", 0)),
         note=str(meta_raw.get("note", "")),
@@ -52,10 +58,16 @@ def load(fs: FilesystemPort, path: Path) -> Roadmap:
     if meta.version < 1:
         raise RoadmapError(f"{path}: [meta].version must be >= 1")
 
-    interfaces = tuple(
-        _parse_interface(item, path) for item in data.get("interfaces", [])
-    )
-    steps = tuple(_parse_step(item, path) for item in data.get("steps", []))
+    try:
+        interfaces_raw = list_of_tables(
+            data.get("interfaces", []), f"{path}: [[interfaces]]"
+        )
+        steps_raw = list_of_tables(data.get("steps", []), f"{path}: [[steps]]")
+    except ValueError as exc:
+        raise RoadmapError(str(exc)) from exc
+
+    interfaces = tuple(_parse_interface(item, path) for item in interfaces_raw)
+    steps = tuple(_parse_step(item, path) for item in steps_raw)
     if not steps:
         raise RoadmapError(f"{path}: [[steps]] must contain at least one step")
 
@@ -68,6 +80,10 @@ def validate(roadmap: Roadmap) -> list[str]:
     An empty list means the roadmap is well-formed. The function is
     deliberately structural: it checks numbering, references, graph
     shape, and path safety, not semantics.
+
+    A cycle in `depends_on` cannot occur here: the check that every
+    dependency refers to an earlier step already rules it out. The
+    predicate is therefore not re-checked.
     """
     problems: list[str] = []
 
@@ -109,9 +125,6 @@ def validate(roadmap: Roadmap) -> list[str]:
             problems.append(
                 f"interface {iface.name!r}: module {iface.module!r}: {reason}"
             )
-
-    if _has_cycle(roadmap.steps):
-        problems.append("depends_on graph contains a cycle")
 
     return problems
 
@@ -221,45 +234,49 @@ def _parse_interface(item: dict, path: Path) -> RoadmapInterface:
 
 
 def _parse_step(item: dict, path: Path) -> RoadmapStep:
-    number = int(item.get("number", 0))
+    number_raw = item.get("number", 0)
+    if not isinstance(number_raw, int) or isinstance(number_raw, bool):
+        raise RoadmapError(f"{path}: a [[steps]] entry has non-integer number")
+    number = number_raw
     if number < 1:
         raise RoadmapError(f"{path}: a [[steps]] entry has invalid number {number}")
     title = str(item.get("title", "")).strip()
     if not title:
         raise RoadmapError(f"{path}: step {number} is missing `title`")
+    try:
+        files = list_of_strings(item.get("files", []), f"{path}: step {number}.files")
+        interfaces = list_of_strings(
+            item.get("interfaces", []), f"{path}: step {number}.interfaces"
+        )
+        acceptance = list_of_strings(
+            item.get("acceptance", []), f"{path}: step {number}.acceptance"
+        )
+        depends_raw = item.get("depends_on", [])
+        if not isinstance(depends_raw, list):
+            raise ValueError(
+                f"{path}: step {number}.depends_on: expected a list of integers, "
+                f"got {type(depends_raw).__name__}"
+            )
+        depends_on: list[int] = []
+        for i, d in enumerate(depends_raw):
+            if not isinstance(d, int) or isinstance(d, bool):
+                raise ValueError(
+                    f"{path}: step {number}.depends_on[{i}]: expected an integer, "
+                    f"got {type(d).__name__}"
+                )
+            depends_on.append(d)
+    except ValueError as exc:
+        raise RoadmapError(str(exc)) from exc
+
     return RoadmapStep(
         number=number,
         title=title,
         goal=str(item.get("goal", "")),
-        files=tuple(str(p) for p in item.get("files", [])),
-        interfaces=tuple(str(n) for n in item.get("interfaces", [])),
-        acceptance=tuple(str(a) for a in item.get("acceptance", [])),
-        depends_on=tuple(int(d) for d in item.get("depends_on", [])),
+        files=tuple(files),
+        interfaces=tuple(interfaces),
+        acceptance=tuple(acceptance),
+        depends_on=tuple(depends_on),
     )
-
-
-def _has_cycle(steps: tuple[RoadmapStep, ...]) -> bool:
-    """True when `depends_on` contains a cycle.
-
-    Depth-first walk with three states: unvisited, visiting, done.
-    """
-    by_number = {s.number: s for s in steps}
-    state: dict[int, int] = {}
-
-    def visit(n: int) -> bool:
-        s = state.get(n, 0)
-        if s == 1:
-            return True
-        if s == 2:
-            return False
-        state[n] = 1
-        for dep in by_number[n].depends_on:
-            if dep in by_number and visit(dep):
-                return True
-        state[n] = 2
-        return False
-
-    return any(visit(n) for n in by_number)
 
 
 __all__ = [

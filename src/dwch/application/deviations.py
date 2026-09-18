@@ -16,7 +16,7 @@ from pathlib import Path
 
 from ..domain.models import Deviation, DeviationType
 from ..shared.errors import DeviationError
-from ..shared.toml import escape_basic_string
+from ..shared.toml import escape_basic_string, list_of_strings, list_of_tables
 from .ports import FilesystemPort
 
 
@@ -47,8 +47,11 @@ def load_recent(fs: FilesystemPort, dir_path: Path, n: int) -> list[Deviation]:
     """Load up to `n` deviation files, newest last.
 
     Both declared and auto files are read. Missing directory is not
-    an error.
+    an error. `n <= 0` returns an empty list: the caller asked for
+    no deviations, not for all of them (`[-0:]` is the whole list).
     """
+    if n <= 0:
+        return []
     if not fs.is_dir(dir_path):
         return []
     files = sorted(fs.glob(dir_path, "step-*.toml"))
@@ -59,8 +62,12 @@ def load_recent(fs: FilesystemPort, dir_path: Path, n: int) -> list[Deviation]:
 
 
 def summarize(deviations: list[Deviation], n: int) -> str:
-    """Render the last `n` deviations as a markdown list."""
-    if not deviations:
+    """Render the last `n` deviations as a markdown list.
+
+    `n <= 0` renders the empty placeholder: the caller asked for no
+    deviations, not for all of them.
+    """
+    if n <= 0 or not deviations:
         return "## Deviations\n\n(none)"
     tail = deviations[-n:]
     lines = ["## Deviations", ""]
@@ -110,15 +117,23 @@ def parse(text: str, path: Path) -> list[Deviation]:
     Pre:  `text` is the file content; `path` is used only for error
           messages.
     Post: returns one `Deviation` per `[[deviation]]` table.
-    Raises: `DeviationError` on malformed TOML or an unknown type.
+    Raises: `DeviationError` on malformed TOML, an unknown type, a
+          list-typed field whose shape is wrong, or a non-boolean
+          `auto` value. A string `auto = "false"` is rejected
+          rather than silently coerced to True by `bool()`.
     """
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise DeviationError(f"invalid TOML in {path}: {exc}") from exc
 
+    try:
+        items = list_of_tables(data.get("deviation", []), f"{path}: [[deviation]]")
+    except ValueError as exc:
+        raise DeviationError(str(exc)) from exc
+
     out: list[Deviation] = []
-    for item in data.get("deviation", []):
+    for item in items:
         raw_type = str(item.get("type", "")).strip()
         try:
             dtype = DeviationType(raw_type)
@@ -126,13 +141,23 @@ def parse(text: str, path: Path) -> list[Deviation]:
             raise DeviationError(
                 f"{path}: unknown deviation type {raw_type!r}"
             ) from exc
+        try:
+            affected = list_of_strings(item.get("affected", []), f"{path}: affected")
+        except ValueError as exc:
+            raise DeviationError(str(exc)) from exc
+        raw_auto = item.get("auto", False)
+        if not isinstance(raw_auto, bool):
+            raise DeviationError(
+                f"{path}: auto must be a boolean, "
+                f"got {type(raw_auto).__name__} ({raw_auto!r})"
+            )
         out.append(
             Deviation(
                 type=dtype,
-                affected=tuple(str(a) for a in item.get("affected", [])),
+                affected=tuple(affected),
                 reason=str(item.get("reason", "")),
                 detail=str(item.get("detail", "")),
-                auto=bool(item.get("auto", False)),
+                auto=raw_auto,
             )
         )
     return out

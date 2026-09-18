@@ -121,6 +121,50 @@ def test_load_step_bad_number(tmp_path: Path) -> None:
         rm.load(_FS, path)
 
 
+def test_load_steps_string_raises(tmp_path: Path) -> None:
+    """A string `steps` field is a `RoadmapError`, not an `AttributeError`.
+
+    `steps` must sit at the TOML top level, before `[meta]` opens a
+    table. Written after `[meta]`, it would be a key inside that
+    table, and `load` would report "missing [[steps]] section".
+    """
+    body = 'steps = "abc"\n\n[meta]\nversion = 1\n'
+    path = _write(tmp_path, body)
+    with pytest.raises(RoadmapError, match="expected a list of tables"):
+        rm.load(_FS, path)
+
+
+def test_load_interfaces_string_raises(tmp_path: Path) -> None:
+    """A string `interfaces` field is a `RoadmapError`.
+
+    Same TOML scoping caveat as `test_load_steps_string_raises`.
+    """
+    body = (
+        'interfaces = "abc"\n\n'
+        "[meta]\nversion = 1\n\n"
+        '[[steps]]\nnumber = 1\ntitle = "x"\n'
+    )
+    path = _write(tmp_path, body)
+    with pytest.raises(RoadmapError, match="expected a list of tables"):
+        rm.load(_FS, path)
+
+
+def test_load_step_files_string_raises(tmp_path: Path) -> None:
+    """A string `files` field on a step is a `RoadmapError`."""
+    body = _VALID.replace('files = ["src/todo.py"]', 'files = "src/todo.py"')
+    path = _write(tmp_path, body)
+    with pytest.raises(RoadmapError, match="expected a list of strings"):
+        rm.load(_FS, path)
+
+
+def test_load_step_depends_on_string_raises(tmp_path: Path) -> None:
+    """A string `depends_on` field is a `RoadmapError`."""
+    body = _VALID.replace("depends_on = []", 'depends_on = "1"')
+    path = _write(tmp_path, body)
+    with pytest.raises(RoadmapError, match="depends_on"):
+        rm.load(_FS, path)
+
+
 def _roadmap(
     steps: list[RoadmapStep],
     interfaces: tuple[RoadmapInterface, ...] = (),

@@ -13,12 +13,13 @@ Refuses to start a development phase when the roadmap is exhausted
 (`roadmap_step >= len(steps)`). At that point the correct action is
 a new planning phase that produces a new roadmap version.
 
-Two lifecycle guards run before any write:
+Three lifecycle guards run before any write:
 
-1. The previous phase must be closed. A phase is closed when
+1. The phase name passes `rules.phase_name_error`.
+2. The previous phase is closed. A phase is closed when
    `state.last_closed` is set and is not older than
    `state.last_opened`.
-2. The phase name must not already exist under `steps/`. Names are
+3. The phase name is not already on disk under `steps/`. Names are
    not reusable: a directory of artifacts is left behind even after
    the phase ends, and reusing a name would mix them.
 
@@ -28,7 +29,11 @@ already-tracked files block the command. This lets the very first
 phase be started right after `dwch init`, when `.harness/` and
 `steps/` are still untracked.
 
-Timestamps are written with microsecond precision, because
+If the commit fails, state is restored and the command exits 2: the
+phase did not start. `handoff.md` is written after `save_state`, so
+a failure between the two leaves both at the old phase.
+
+Timestamps use `state.now_iso()` (microsecond precision), because
 `is_phase_closed` compares `last_closed` and `last_opened` as
 strings; second-resolution would let a rapid close/new-phase pair
 collide.
@@ -38,25 +43,19 @@ from __future__ import annotations
 
 import sys
 from argparse import Namespace
-from datetime import UTC, datetime
 from importlib.resources import files
 
-from ...domain.rules import is_phase_closed, is_roadmap_frozen
+from ...domain.rules import (
+    is_phase_closed,
+    is_roadmap_frozen,
+    phase_name_error,
+)
 from ...shared.errors import HarnessError
 from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
 from ..handoff import ensure_metadata
-from ..state import load_state, save_state, with_updates
-
-# Must match `state._TIMESTAMP_TIMESPEC`; see that module for the
-# rationale.
-_TIMESTAMP_TIMESPEC = "microseconds"
-
-# Characters that are unsafe in a directory name on any of the
-# supported platforms: Windows reserves them, POSIX would accept
-# them but the user's expectation is that a phase name is a slug.
-_INVALID_NAME_CHARS = frozenset('<>:"|?*')
+from ..state import load_state, now_iso, save_state, with_updates
 
 
 def cmd_new_phase(args: Namespace, deps: Deps) -> int:
@@ -68,7 +67,16 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    # Guard 1: the previous phase must be closed.
+    # Guard 1: the name must be a safe directory name. This runs
+    # before the on-disk check so a control character cannot reach
+    # `Path.exists`.
+    name = args.name
+    err = phase_name_error(name)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+
+    # Guard 2: the previous phase must be closed.
     if state.current_phase != "unset" and not is_phase_closed(state):
         print(
             f"error: phase {state.current_phase} is not closed. "
@@ -77,20 +85,14 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
         )
         return 2
 
-    name = args.name
     steps_root = deps.project_root / config.paths.get("steps", "steps")
 
-    # Guard 2: phase names are unique on disk.
+    # Guard 3: phase names are unique on disk.
     if deps.fs.exists(steps_root / name):
         print(
             f"error: phase {name} already exists; choose a different name.",
             file=sys.stderr,
         )
-        return 2
-
-    err = _validate_phase_name(name)
-    if err is not None:
-        print(f"error: {err}", file=sys.stderr)
         return 2
 
     if not deps.git.is_clean_tracked(deps.project_root):
@@ -126,10 +128,8 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
             file=sys.stderr,
         )
 
-    now = datetime.now(UTC).isoformat(timespec=_TIMESTAMP_TIMESPEC)
+    now = now_iso()
     head = deps.git.try_head(deps.project_root)
-
-    _reset_handoff(deps, name, kind)
 
     updated = with_updates(
         state,
@@ -141,6 +141,8 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
         last_opened=now,
     )
     save_state(deps.fs, deps.project_root, updated)
+
+    _reset_handoff(deps, name, kind)
     ensure_metadata(deps.fs, deps.project_root, updated)
 
     try:
@@ -148,8 +150,18 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
             deps.project_root, f"chore: start {kind} phase {name}"
         )
     except HarnessError as exc:
-        print(f"warning: could not commit new phase: {exc}", file=sys.stderr)
-        commit = head
+        # The phase did not start. Restore state and the handoff so
+        # the next command sees the previous phase.
+        save_state(deps.fs, deps.project_root, state)
+        _reset_handoff(deps, state.current_phase, state.phase_kind)
+        ensure_metadata(deps.fs, deps.project_root, state)
+        print(f"error: commit failed: {exc}", file=sys.stderr)
+        print(
+            "state was restored; the phase did not start. "
+            "Fix the tree and re-run `dwch new-phase`.",
+            file=sys.stderr,
+        )
+        return 2
 
     print(f"new phase: {name} ({kind})")
     if commit and commit != head:
@@ -196,30 +208,6 @@ def _resolve_start_step(deps: Deps, config, state, kind: str) -> int:
     return state.roadmap_step
 
 
-def _validate_phase_name(name: str) -> str | None:
-    """Return an error message when `name` is not a safe directory name.
-
-    A phase name becomes a directory under `steps/`, so it must not
-    contain path separators, parent references, or characters that
-    are illegal on Windows.
-    """
-    if not name:
-        return "phase name must be non-empty"
-    if name != name.strip():
-        return "phase name must not have leading or trailing whitespace"
-    if " " in name:
-        return "phase name must not contain spaces"
-    if "/" in name or "\\" in name:
-        return "phase name must not contain path separators"
-    if name in {".", ".."}:
-        return "phase name must not be '.' or '..'"
-    bad = sorted(set(name) & _INVALID_NAME_CHARS)
-    if bad:
-        joined = " ".join(repr(c) for c in bad)
-        return f"phase name contains invalid characters: {joined}"
-    return None
-
-
 def _reset_handoff(deps: Deps, name: str, kind: str) -> None:
     """Write `.harness/handoff.md` from the phase-kind template.
 
@@ -227,11 +215,18 @@ def _reset_handoff(deps: Deps, name: str, kind: str) -> None:
     placeholder values; `ensure_metadata` rewrites it in place
     after `save_state` runs.
     """
-    template_name = (
-        "planning-handoff.md" if kind == "planning" else "development-handoff.md"
-    )
+    if kind == "planning":
+        template_name = "planning-handoff.md"
+    else:
+        template_name = "development-handoff.md"
     template = files("dwch.templates") / template_name
-    body = template.read_text(encoding="utf-8").replace("{{phase}}", name)
+    try:
+        body = template.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot read shipped template {template_name}: {exc}"
+        ) from exc
+    body = body.replace("{{phase}}", name)
     deps.fs.write_text(deps.project_root / ".harness" / "handoff.md", body)
 
 
