@@ -52,6 +52,11 @@ def _write(root: Path, body: str) -> Path:
     return path
 
 
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+
 def test_load_valid(tmp_path: Path) -> None:
     """A well-formed roadmap loads with all sections populated."""
     path = _write(tmp_path, _VALID)
@@ -122,28 +127,8 @@ def test_load_step_bad_number(tmp_path: Path) -> None:
 
 
 def test_load_steps_string_raises(tmp_path: Path) -> None:
-    """A string `steps` field is a `RoadmapError`, not an `AttributeError`.
-
-    `steps` must sit at the TOML top level, before `[meta]` opens a
-    table. Written after `[meta]`, it would be a key inside that
-    table, and `load` would report "missing [[steps]] section".
-    """
+    """A string `steps` field is a `RoadmapError`, not an `AttributeError`."""
     body = 'steps = "abc"\n\n[meta]\nversion = 1\n'
-    path = _write(tmp_path, body)
-    with pytest.raises(RoadmapError, match="expected a list of tables"):
-        rm.load(_FS, path)
-
-
-def test_load_interfaces_string_raises(tmp_path: Path) -> None:
-    """A string `interfaces` field is a `RoadmapError`.
-
-    Same TOML scoping caveat as `test_load_steps_string_raises`.
-    """
-    body = (
-        'interfaces = "abc"\n\n'
-        "[meta]\nversion = 1\n\n"
-        '[[steps]]\nnumber = 1\ntitle = "x"\n'
-    )
     path = _write(tmp_path, body)
     with pytest.raises(RoadmapError, match="expected a list of tables"):
         rm.load(_FS, path)
@@ -163,6 +148,73 @@ def test_load_step_depends_on_string_raises(tmp_path: Path) -> None:
     path = _write(tmp_path, body)
     with pytest.raises(RoadmapError, match="depends_on"):
         rm.load(_FS, path)
+
+
+# ---------------------------------------------------------------------------
+# removes / moves parsing
+# ---------------------------------------------------------------------------
+
+
+def test_load_step_removes_and_moves(tmp_path: Path) -> None:
+    """`removes` and `moves` parse into the model."""
+    body = _VALID.replace(
+        'files = ["src/todo.py"]',
+        'files = ["src/todo.py"]\n'
+        'removes = ["src/legacy.py"]\n'
+        "moves = [\n"
+        '  { from = "src/models.py", to = "src/models/__init__.py" },\n'
+        "]",
+    )
+    path = _write(tmp_path, body)
+    roadmap = rm.load(_FS, path)
+    assert roadmap.steps[0].removes == ("src/legacy.py",)
+    assert roadmap.steps[0].moves == (("src/models.py", "src/models/__init__.py"),)
+
+
+def test_load_step_missing_removes_moves_default_empty(tmp_path: Path) -> None:
+    """An older roadmap without the new keys still parses."""
+    path = _write(tmp_path, _VALID)
+    roadmap = rm.load(_FS, path)
+    assert roadmap.steps[0].removes == ()
+    assert roadmap.steps[0].moves == ()
+
+
+def test_load_step_removes_string_raises(tmp_path: Path) -> None:
+    """A string `removes` field is a `RoadmapError`."""
+    body = _VALID.replace(
+        'files = ["src/todo.py"]',
+        'files = ["src/todo.py"]\nremoves = "src/legacy.py"',
+    )
+    path = _write(tmp_path, body)
+    with pytest.raises(RoadmapError, match="expected a list of strings"):
+        rm.load(_FS, path)
+
+
+def test_load_step_moves_string_raises(tmp_path: Path) -> None:
+    """A string `moves` field is a `RoadmapError`."""
+    body = _VALID.replace(
+        'files = ["src/todo.py"]',
+        'files = ["src/todo.py"]\nmoves = "src/a.py"',
+    )
+    path = _write(tmp_path, body)
+    with pytest.raises(RoadmapError, match="expected a list of tables"):
+        rm.load(_FS, path)
+
+
+def test_load_step_moves_item_missing_field_raises(tmp_path: Path) -> None:
+    """A `moves` item without `to` is a `RoadmapError`."""
+    body = _VALID.replace(
+        'files = ["src/todo.py"]',
+        'files = ["src/todo.py"]\nmoves = [{ from = "src/a.py" }]',
+    )
+    path = _write(tmp_path, body)
+    with pytest.raises(RoadmapError, match="must both be strings"):
+        rm.load(_FS, path)
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
 
 
 def _roadmap(
@@ -215,19 +267,6 @@ def test_validate_unknown_interface() -> None:
     assert any("unknown interface" in p for p in problems)
 
 
-def test_validate_duplicate_interface_name() -> None:
-    """Duplicate interface names are reported."""
-    iface = RoadmapInterface(
-        name="X",
-        kind="class",
-        module="a.py",
-        signature="class X",
-        doc="",
-    )
-    problems = rm.validate(_roadmap([_step(1)], interfaces=(iface, iface)))
-    assert any("interface names are not unique" in p for p in problems)
-
-
 def test_validate_depends_on_forward() -> None:
     """A dependency on a later step is reported."""
     problems = rm.validate(_roadmap([_step(1, depends_on=(2,)), _step(2)]))
@@ -251,6 +290,102 @@ def test_validate_interface_module_unsafe() -> None:
     )
     problems = rm.validate(_roadmap([_step(1)], interfaces=(iface,)))
     assert any("absolute path" in p for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# removes / moves validation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_removes_intersects_files() -> None:
+    """`removes` overlapping `files` is reported."""
+    step = _step(1, files=("a.py",), removes=("a.py",))
+    problems = rm.validate(_roadmap([step]))
+    assert any("removes intersects files" in p for p in problems)
+
+
+def test_validate_moves_from_intersects_files() -> None:
+    """`moves.from` overlapping `files` is reported."""
+    step = _step(1, files=("a.py",), moves=(("a.py", "b.py"),))
+    problems = rm.validate(_roadmap([step]))
+    assert any("moves.from intersects files" in p for p in problems)
+
+
+def test_validate_moves_to_intersects_files() -> None:
+    """`moves.to` overlapping `files` is reported."""
+    step = _step(1, files=("b.py",), moves=(("a.py", "b.py"),))
+    problems = rm.validate(_roadmap([step]))
+    assert any("moves.to intersects files" in p for p in problems)
+
+
+def test_validate_moves_from_intersects_removes() -> None:
+    """`moves.from` overlapping `removes` is reported."""
+    step = _step(1, removes=("a.py",), moves=(("a.py", "b.py"),))
+    problems = rm.validate(_roadmap([step]))
+    assert any("moves.from intersects removes" in p for p in problems)
+
+
+def test_validate_moves_duplicate_from() -> None:
+    """Duplicate `moves.from` values are reported."""
+    step = _step(
+        1,
+        moves=(("a.py", "b.py"), ("a.py", "c.py")),
+    )
+    problems = rm.validate(_roadmap([step]))
+    assert any("moves.from values are not unique" in p for p in problems)
+
+
+def test_validate_moves_duplicate_to() -> None:
+    """Duplicate `moves.to` values are reported."""
+    step = _step(
+        1,
+        moves=(("a.py", "c.py"), ("b.py", "c.py")),
+    )
+    problems = rm.validate(_roadmap([step]))
+    assert any("moves.to values are not unique" in p for p in problems)
+
+
+def test_validate_moves_from_equals_to() -> None:
+    """A move with `from == to` is reported."""
+    step = _step(1, moves=(("a.py", "a.py"),))
+    problems = rm.validate(_roadmap([step]))
+    assert any("identical from and to" in p for p in problems)
+
+
+def test_validate_moves_chain() -> None:
+    """A chained move (`a→b`, `b→c`) is reported."""
+    step = _step(
+        1,
+        moves=(("a.py", "b.py"), ("b.py", "c.py")),
+    )
+    problems = rm.validate(_roadmap([step]))
+    assert any("chained moves" in p for p in problems)
+
+
+def test_validate_unsafe_path_in_removes() -> None:
+    """An absolute path in `removes` is reported."""
+    step = _step(1, removes=("/abs.py",))
+    problems = rm.validate(_roadmap([step]))
+    assert any("removes" in p and "absolute path" in p for p in problems)
+
+
+def test_validate_unsafe_path_in_moves() -> None:
+    """An absolute path in `moves` is reported."""
+    step = _step(1, moves=(("/abs.py", "b.py"),))
+    problems = rm.validate(_roadmap([step]))
+    assert any("moves.from" in p and "absolute" in p for p in problems)
+
+
+def test_validate_safe_path_with_root(tmp_path: Path) -> None:
+    """With a project root, reserved names in `removes` are reported."""
+    step = _step(1, removes=("src/CON",))
+    problems = rm.validate(_roadmap([step]), tmp_path)
+    assert any("removes" in p for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def test_find_step() -> None:
@@ -290,20 +425,28 @@ def test_render_summary() -> None:
     assert "*pending*" in text
 
 
-def test_render_current() -> None:
-    """`render_current` lists files, interfaces, and acceptance."""
+def test_render_current_includes_removes_and_moves() -> None:
+    """`render_current` shows removes and moves when present."""
     step = _step(
         1,
-        title="Models",
-        goal="Write code",
+        title="Move",
+        goal="go",
         files=("a.py",),
-        interfaces=("X",),
-        acceptance=("works",),
+        removes=("old.py",),
+        moves=(("x.py", "y.py"),),
     )
     text = rm.render_current(step)
-    assert "## Current step 1: Models" in text
-    assert "a.py" in text
-    assert "works" in text
+    assert "Removes:" in text
+    assert "old.py" in text
+    assert "Moves:" in text
+    assert "x.py → y.py" in text
+
+
+def test_render_current_empty_removes_moves() -> None:
+    """Empty removes and moves render as `(none)`."""
+    step = _step(1, title="t", goal="", files=("a.py",))
+    text = rm.render_current(step)
+    assert text.count("(none)") >= 2
 
 
 def test_render_interfaces_empty() -> None:

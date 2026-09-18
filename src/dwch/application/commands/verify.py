@@ -31,7 +31,14 @@ import sys
 from argparse import Namespace
 from pathlib import Path, PurePosixPath
 
-from ...domain.models import CheckResult, Deviation, FileSpec, Report, Roadmap
+from ...domain.models import (
+    CheckResult,
+    Deviation,
+    Report,
+    Roadmap,
+    StepOp,
+    op_written_paths,
+)
 from ...domain.rules import (
     has_blocker,
     is_development_phase,
@@ -58,7 +65,7 @@ from ..state import load_state, now_iso, save_state, with_updates
 from ..verify_checks import (
     check_architecture_lock,
     check_compile,
-    check_roadmap_files,
+    check_roadmap_changes,
     check_roadmap_interfaces,
     check_roadmap_step,
     compute_auto_deviations,
@@ -101,10 +108,10 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
         return 2
 
     step_text = deps.fs.read_text(step_file)
-    specs = _parse_step_or_none(step_text)
-    if specs is None:
+    ops = _parse_step_or_none(step_text)
+    if ops is None:
         print(
-            f"error: {step_file.name} contains no valid FILE blocks. "
+            f"error: {step_file.name} contains no valid blocks. "
             "The preceding `apply` failed to parse it. "
             "Re-run `apply` with a valid message before verifying.",
             file=sys.stderr,
@@ -115,7 +122,7 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
     # paths were validated when it was written, but not since. Run
     # the same validation here before any path is used.
     try:
-        validate_paths(specs, deps.project_root)
+        validate_paths(ops, deps.project_root)
     except FormatError as exc:
         print(
             f"error: {step_file.name} contains an unsafe path: {exc}",
@@ -123,7 +130,11 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
         )
         return 2
 
-    missing = [s.path for s in specs if not deps.fs.is_file(deps.project_root / s.path)]
+    missing: list[str] = []
+    for op in ops:
+        for path in op_written_paths(op):
+            if not deps.fs.is_file(deps.project_root / path):
+                missing.append(path)
     if missing:
         print(
             "error: step references files that do not exist on disk: "
@@ -153,11 +164,9 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
     checks: list[CheckResult] = []
 
     if is_planning:
-        checks.extend(_planning_checks(specs, deps, config, roadmap))
+        checks.extend(_planning_checks(ops, deps, config, roadmap))
     elif is_development:
-        checks.extend(
-            _development_checks(step_num, deps, config, state, roadmap, specs)
-        )
+        checks.extend(_development_checks(step_num, deps, config, state, roadmap, ops))
     else:
         print(
             "error: no phase is active. Run `dwch new-phase NAME --kind ...` first.",
@@ -204,7 +213,7 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
     ):
         current = roadmap_mod.find_step(roadmap, state.roadmap_step + 1)
         if current is not None:
-            auto_devs = compute_auto_deviations(specs, current)
+            auto_devs = compute_auto_deviations(ops, current)
 
     before_step = state.roadmap_step
     after_step = before_step
@@ -219,7 +228,7 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
             is_development
             and is_roadmap_frozen(state)
             and roadmap is not None
-            and is_substantive(specs)
+            and is_substantive(ops)
         )
         updated = with_updates(
             state,
@@ -300,10 +309,10 @@ def _load_roadmap_or_none(deps: Deps, path: Path) -> Roadmap | None:
         return None
 
 
-def _parse_step_or_none(text: str) -> list[FileSpec] | None:
+def _parse_step_or_none(text: str) -> list[StepOp] | None:
     """Parse a step message, returning `None` on any format error.
 
-    Distinguishes "the message had no FILE blocks" from "the message
+    Distinguishes "the message had no blocks" from "the message
     had blocks, but one was malformed". Both are errors for verify,
     but the caller's message benefits from knowing which.
     """
@@ -314,7 +323,7 @@ def _parse_step_or_none(text: str) -> list[FileSpec] | None:
 
 
 def _planning_checks(
-    specs: list[FileSpec],
+    ops: list[StepOp],
     deps: Deps,
     config,
     roadmap,
@@ -333,7 +342,9 @@ def _planning_checks(
         str(config.roadmap.get("path", ".harness/roadmap.toml")).replace("\\", "/")
     )
     wrote_roadmap = any(
-        PurePosixPath(s.path.replace("\\", "/")) == roadmap_rel for s in specs
+        PurePosixPath(p.replace("\\", "/")) == roadmap_rel
+        for op in ops
+        for p in op_written_paths(op)
     )
     if wrote_roadmap:
         if roadmap is None:
@@ -348,7 +359,7 @@ def _planning_checks(
                 )
             )
         else:
-            problems = roadmap_mod.validate(roadmap)
+            problems = roadmap_mod.validate(roadmap, deps.project_root)
             out.append(
                 CheckResult(
                     name="roadmap-structure",
@@ -370,19 +381,19 @@ def _development_checks(
     config,
     state,
     roadmap,
-    specs: list[FileSpec],
+    ops: list[StepOp],
 ) -> list[CheckResult]:
     """Checks that run only in a development phase."""
-    out: list[CheckResult] = [check_compile(specs, deps)]
+    out: list[CheckResult] = [check_compile(ops, deps)]
 
     if is_roadmap_frozen(state) and roadmap is not None:
         out.append(check_roadmap_step(step_num, state, roadmap))
         current = roadmap_mod.find_step(roadmap, state.roadmap_step + 1)
         if current is not None:
-            out.append(check_roadmap_files(specs, current))
+            out.append(check_roadmap_changes(ops, current))
             out.append(
                 check_roadmap_interfaces(
-                    deps.fs, deps.project_root, specs, current, roadmap
+                    deps.fs, deps.project_root, ops, current, roadmap
                 )
             )
 

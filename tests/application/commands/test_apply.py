@@ -26,6 +26,16 @@ def _phase(root: Path, deps, name: str = "p1", kind: str = "planning") -> None:
     assert cmd_new_phase(Namespace(name=name, kind=kind), deps) == 0
 
 
+def _commit(deps, root: Path, message: str = "checkpoint") -> None:
+    """Commit the tree so DELETE preconditions can see tracked files."""
+    deps.git.commit_all(root, message)
+
+
+# ---------------------------------------------------------------------------
+# FILE ops
+# ---------------------------------------------------------------------------
+
+
 def test_apply_writes_files(harness_root: Path, deps) -> None:
     """A valid step message writes its files and the raw log."""
     _phase(harness_root, deps)
@@ -115,8 +125,156 @@ def test_apply_rollback_on_write_failure(harness_root: Path, deps) -> None:
     deps.clipboard.text = (
         "<<<FILE:src/a.py>>>\n1\n<<<END>>>\n<<<FILE:src/b.py>>>\n2\n<<<END>>>\n"
     )
-    assert cmd_apply(_args("01"), deps) == 2
+    assert cmd_apply(_args("01"), deps) == 1
     assert not (harness_root / "src" / "a.py").exists()
+
+
+# ---------------------------------------------------------------------------
+# DELETE ops
+# ---------------------------------------------------------------------------
+
+
+def test_apply_delete_removes_tracked_file(harness_root: Path, deps) -> None:
+    """A DELETE op removes a file that git tracks."""
+    _phase(harness_root, deps)
+    (harness_root / "src").mkdir(parents=True, exist_ok=True)
+    (harness_root / "src" / "old.py").write_text("x = 1\n", encoding="utf-8")
+    _commit(deps, harness_root)
+    deps.clipboard.text = "<<<DELETE:src/old.py>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 0
+    assert not (harness_root / "src" / "old.py").exists()
+
+
+def test_apply_delete_untracked_refused(harness_root: Path, deps, capsys) -> None:
+    """Deleting an untracked file is refused before any write."""
+    _phase(harness_root, deps)
+    (harness_root / "src").mkdir(parents=True, exist_ok=True)
+    (harness_root / "src" / "loose.py").write_text("x = 1\n", encoding="utf-8")
+    deps.clipboard.text = "<<<DELETE:src/loose.py>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 1
+    assert (harness_root / "src" / "loose.py").exists()
+    assert "untracked" in capsys.readouterr().err
+
+
+def test_apply_delete_directory_refused(harness_root: Path, deps) -> None:
+    """A DELETE targeting a directory is refused."""
+    _phase(harness_root, deps)
+    (harness_root / "src").mkdir(parents=True, exist_ok=True)
+    deps.clipboard.text = "<<<DELETE:src>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 1
+    assert (harness_root / "src").is_dir()
+
+
+def test_apply_delete_protected_refused(harness_root: Path, deps, capsys) -> None:
+    """A DELETE targeting a protected path is refused."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = "<<<DELETE:.harness/state.toml>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 1
+    assert "protected" in capsys.readouterr().err
+
+
+def test_apply_delete_with_non_empty_body(harness_root: Path, deps) -> None:
+    """A DELETE block with a printable body is refused."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = "<<<DELETE:src/old.py>>>\nfoo\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 1
+
+
+def test_apply_log_records_delete(harness_root: Path, deps) -> None:
+    """The apply log lists the deleted path."""
+    _phase(harness_root, deps)
+    (harness_root / "src").mkdir(parents=True, exist_ok=True)
+    (harness_root / "src" / "old.py").write_text("x = 1\n", encoding="utf-8")
+    _commit(deps, harness_root)
+    deps.clipboard.text = "<<<DELETE:src/old.py>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 0
+    log = (harness_root / "steps" / "p1" / "apply-01.log").read_text(encoding="utf-8")
+    assert "deleted src/old.py" in log
+
+
+# ---------------------------------------------------------------------------
+# MOVE ops
+# ---------------------------------------------------------------------------
+
+
+def test_apply_move_renames_file(harness_root: Path, deps) -> None:
+    """A MOVE op renames the file and preserves its content."""
+    _phase(harness_root, deps)
+    (harness_root / "src").mkdir(parents=True, exist_ok=True)
+    (harness_root / "src" / "old.py").write_text("x = 1\n", encoding="utf-8")
+    _commit(deps, harness_root)
+    deps.clipboard.text = "<<<MOVE:src/old.py:src/new.py>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 0
+    assert not (harness_root / "src" / "old.py").exists()
+    assert (harness_root / "src" / "new.py").read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_apply_move_dst_exists_refused(harness_root: Path, deps, capsys) -> None:
+    """A MOVE whose destination exists is refused."""
+    _phase(harness_root, deps)
+    (harness_root / "src").mkdir(parents=True, exist_ok=True)
+    (harness_root / "src" / "a.py").write_text("a\n", encoding="utf-8")
+    (harness_root / "src" / "b.py").write_text("b\n", encoding="utf-8")
+    _commit(deps, harness_root)
+    deps.clipboard.text = "<<<MOVE:src/a.py:src/b.py>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 1
+    assert (harness_root / "src" / "a.py").exists()
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_apply_move_src_missing_refused(harness_root: Path, deps) -> None:
+    """A MOVE whose source does not exist is refused."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = "<<<MOVE:src/ghost.py:src/new.py>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 1
+
+
+def test_apply_move_protected_refused(harness_root: Path, deps, capsys) -> None:
+    """A MOVE whose source is protected is refused."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = (
+        "<<<MOVE:.harness/roadmap.toml:src/roadmap_backup.toml>>>\n<<<END>>>\n"
+    )
+    assert cmd_apply(_args("01"), deps) == 1
+    assert "protected" in capsys.readouterr().err
+
+
+def test_apply_log_records_move(harness_root: Path, deps) -> None:
+    """The apply log lists the moved pair."""
+    _phase(harness_root, deps)
+    (harness_root / "src").mkdir(parents=True, exist_ok=True)
+    (harness_root / "src" / "old.py").write_text("x\n", encoding="utf-8")
+    _commit(deps, harness_root)
+    deps.clipboard.text = "<<<MOVE:src/old.py:src/new.py>>>\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 0
+    log = (harness_root / "steps" / "p1" / "apply-01.log").read_text(encoding="utf-8")
+    assert "moved src/old.py → src/new.py" in log
+
+
+# ---------------------------------------------------------------------------
+# Dirty tracked files
+# ---------------------------------------------------------------------------
+
+
+def test_apply_refuses_dirty_tracked_file(harness_root: Path, deps, capsys) -> None:
+    """A step touching a modified tracked file is refused."""
+    _phase(harness_root, deps)
+    (harness_root / "src").mkdir(parents=True, exist_ok=True)
+    (harness_root / "src" / "a.py").write_text("v1\n", encoding="utf-8")
+    _commit(deps, harness_root)
+    # Modify without committing.
+    (harness_root / "src" / "a.py").write_text("v2\n", encoding="utf-8")
+    deps.clipboard.text = "<<<FILE:src/a.py>>>\nnew\n<<<END>>>\n"
+    assert cmd_apply(_args("01"), deps) == 1
+    err = capsys.readouterr().err
+    assert "uncommitted changes" in err
+    # File content on disk is unchanged.
+    assert (harness_root / "src" / "a.py").read_text(encoding="utf-8") == "v2\n"
+
+
+# ---------------------------------------------------------------------------
+# Summary form
+# ---------------------------------------------------------------------------
 
 
 def test_apply_summary_ok(harness_root: Path, deps) -> None:
@@ -160,6 +318,13 @@ def test_apply_summary_multiple_blocks(harness_root: Path, deps) -> None:
         "<<<FILE:.harness/summaries/p1.md>>>\nbody\n<<<END>>>\n"
         "<<<FILE:other.txt>>>\nx\n<<<END>>>\n"
     )
+    assert cmd_apply(_summary_args(), deps) == 1
+
+
+def test_apply_summary_delete_block_refused(harness_root: Path, deps) -> None:
+    """A summary consisting of a DELETE block is refused."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = "<<<DELETE:.harness/summaries/p1.md>>>\n<<<END>>>\n"
     assert cmd_apply(_summary_args(), deps) == 1
 
 

@@ -12,13 +12,16 @@ from pathlib import Path
 
 from ..domain.models import (
     CheckResult,
+    DeleteOp,
     Deviation,
     DeviationType,
-    FileSpec,
     Lock,
+    MoveOp,
     Roadmap,
     RoadmapStep,
     State,
+    StepOp,
+    WriteOp,
 )
 from ..shared.errors import HarnessError
 from . import lock as lock_mod
@@ -28,18 +31,22 @@ from .deps import Deps
 from .ports import FilesystemPort
 
 
-def check_compile(specs: list[FileSpec], deps: Deps) -> CheckResult:
-    """Run `compile()` on every `.py` file listed in the step.
+def check_compile(ops: list[StepOp], deps: Deps) -> CheckResult:
+    """Run `compile()` on every `.py` file the step writes.
 
+    `WriteOp.path` and `MoveOp.dst` are compiled; `DeleteOp.path`
+    and `MoveOp.src` are not, because those files no longer exist.
     Reports syntax errors as `exit_code=1` with a per-file list in
     `stdout`. Files that do not end in `.py` are ignored; if none
     remain, the check passes with `(no python files)`.
-
-    The source is read through the filesystem port, and `compile()`
-    is called directly: it does not print to stdout or stderr, so
-    no redirection is needed.
     """
-    py_files = [s.path for s in specs if s.path.endswith(".py")]
+    py_files: list[str] = []
+    for op in ops:
+        if isinstance(op, WriteOp) and op.path.endswith(".py"):
+            py_files.append(op.path)
+        elif isinstance(op, MoveOp) and op.dst.endswith(".py"):
+            py_files.append(op.dst)
+
     if not py_files:
         return CheckResult(
             name="compile",
@@ -119,34 +126,84 @@ def check_roadmap_step(
     )
 
 
-def check_roadmap_files(specs: list[FileSpec], step: RoadmapStep) -> CheckResult:
-    """Compare written files against `step.files`.
+def check_roadmap_changes(ops: list[StepOp], step: RoadmapStep) -> CheckResult:
+    """Compare written, deleted, and moved files against the roadmap.
 
-    Deviation files (`.harness/deviations/...`) are never counted as
-    extra: they are the mechanism by which the coder talks back to
-    the plan.
+    Three sets are compared, each producing `extra-*` and
+    `missing-*`:
+
+    - written: `WriteOp.path` vs `step.files`;
+    - deleted: `DeleteOp.path` vs `step.removes`;
+    - moves:   `(MoveOp.src, MoveOp.dst)` vs `step.moves`.
+
+    A `MoveOp` contributes only to the `moved` set. It does not
+    also count as a write of its destination or a delete of its
+    source: the roadmap schema tracks a rename as one move, and
+    the intersection rules in `roadmap.validate` would forbid the
+    duplication anyway.
+
+    Deviation files (`.harness/deviations/...`) are never counted
+    as extra: they are the mechanism by which the coder talks back
+    to the plan.
     """
-    written = {
-        s.path.replace("\\", "/")
-        for s in specs
-        if not s.path.replace("\\", "/").startswith(".harness/deviations/")
+    written: set[str] = set()
+    deleted: set[str] = set()
+    moved: set[tuple[str, str]] = set()
+    for op in ops:
+        if isinstance(op, WriteOp):
+            p = op.path.replace("\\", "/")
+            if p.startswith(".harness/deviations/"):
+                continue
+            written.add(p)
+        elif isinstance(op, DeleteOp):
+            deleted.add(op.path.replace("\\", "/"))
+        elif isinstance(op, MoveOp):
+            src = op.src.replace("\\", "/")
+            dst = op.dst.replace("\\", "/")
+            moved.add((src, dst))
+
+    expected_written = {p.replace("\\", "/") for p in step.files}
+    expected_deleted = {p.replace("\\", "/") for p in step.removes}
+    expected_moved = {
+        (s.replace("\\", "/"), d.replace("\\", "/")) for s, d in step.moves
     }
-    expected = set(step.files)
-    extra = sorted(written - expected)
-    missing = sorted(expected - written)
-    ok = not extra and not missing
-    lines: list[str] = []
-    if extra:
-        lines.append("extra:   " + ", ".join(extra))
-    if missing:
-        lines.append("missing: " + ", ".join(missing))
+
+    diffs: list[str] = []
+    for label, extra, missing in (
+        (
+            "written",
+            sorted(written - expected_written),
+            sorted(expected_written - written),
+        ),
+        (
+            "deleted",
+            sorted(deleted - expected_deleted),
+            sorted(expected_deleted - deleted),
+        ),
+    ):
+        if extra:
+            diffs.append(f"extra {label}:   " + ", ".join(extra))
+        if missing:
+            diffs.append(f"missing {label}: " + ", ".join(missing))
+    extra_moves = sorted(moved - expected_moved)
+    missing_moves = sorted(expected_moved - moved)
+    if extra_moves:
+        diffs.append(
+            "extra moves:   " + ", ".join(f"{s} -> {d}" for s, d in extra_moves)
+        )
+    if missing_moves:
+        diffs.append(
+            "missing moves: " + ", ".join(f"{s} -> {d}" for s, d in missing_moves)
+        )
+
+    ok = not diffs
     if ok:
-        lines.append("files match")
+        diffs.append("changes match")
     return CheckResult(
-        name="roadmap-files",
-        command=("roadmap-files",),
+        name="roadmap-changes",
+        command=("roadmap-changes",),
         exit_code=0 if ok else 1,
-        stdout="\n".join(lines),
+        stdout="\n".join(diffs),
         stderr="",
         required=False,
     )
@@ -155,7 +212,7 @@ def check_roadmap_files(specs: list[FileSpec], step: RoadmapStep) -> CheckResult
 def check_roadmap_interfaces(
     fs: FilesystemPort,
     project_root: Path,
-    specs: list[FileSpec],
+    ops: list[StepOp],
     step: RoadmapStep,
     roadmap: Roadmap,
 ) -> CheckResult:
@@ -243,45 +300,88 @@ def run_configured(specs: list[dict], deps: Deps) -> list[CheckResult]:
 
 
 def compute_auto_deviations(
-    specs: list[FileSpec],
+    ops: list[StepOp],
     step: RoadmapStep,
 ) -> list[Deviation]:
-    """Derive auto-deviations from file-set mismatches.
+    """Derive auto-deviations from the six set diffs.
 
-    Only the file set is checked here. Interface drift is reported
-    in the check, not written to `deviations/`: it is often
-    transient (a symbol appears on a later step).
+    A `MoveOp` contributes only to the `moved` set; see
+    `check_roadmap_changes` for the reasoning. Only file-set
+    mismatches are written to `deviations/`. Interface drift is
+    reported in the check, not here: it is often transient (a
+    symbol appears on a later step).
     """
-    written = {
-        s.path.replace("\\", "/")
-        for s in specs
-        if not s.path.replace("\\", "/").startswith(".harness/deviations/")
+    written: set[str] = set()
+    deleted: set[str] = set()
+    moved: set[tuple[str, str]] = set()
+    for op in ops:
+        if isinstance(op, WriteOp):
+            p = op.path.replace("\\", "/")
+            if p.startswith(".harness/deviations/"):
+                continue
+            written.add(p)
+        elif isinstance(op, DeleteOp):
+            deleted.add(op.path.replace("\\", "/"))
+        elif isinstance(op, MoveOp):
+            src = op.src.replace("\\", "/")
+            dst = op.dst.replace("\\", "/")
+            moved.add((src, dst))
+
+    expected_written = {p.replace("\\", "/") for p in step.files}
+    expected_deleted = {p.replace("\\", "/") for p in step.removes}
+    expected_moved = {
+        (s.replace("\\", "/"), d.replace("\\", "/")) for s, d in step.moves
     }
-    expected = set(step.files)
+
     out: list[Deviation] = []
-    extra = sorted(written - expected)
-    missing = sorted(expected - written)
+    extra = sorted(written - expected_written)
+    missing = sorted(expected_written - written)
     if extra:
+        out.append(_auto(DeviationType.EXTRA_FILE, extra))
+    if missing:
+        out.append(_auto(DeviationType.MISSING_FILE, missing))
+
+    extra_removals = sorted(deleted - expected_deleted)
+    missing_removals = sorted(expected_deleted - deleted)
+    if extra_removals:
+        out.append(_auto(DeviationType.EXTRA_REMOVAL, extra_removals))
+    if missing_removals:
+        out.append(_auto(DeviationType.MISSING_REMOVAL, missing_removals))
+
+    extra_moves = sorted(moved - expected_moved)
+    missing_moves = sorted(expected_moved - moved)
+    if extra_moves:
         out.append(
             Deviation(
-                type=DeviationType.EXTRA_FILE,
-                affected=tuple(extra),
+                type=DeviationType.EXTRA_MOVE,
+                affected=tuple(f"{s} -> {d}" for s, d in extra_moves),
                 reason="auto-detected by verify",
                 detail="",
                 auto=True,
             )
         )
-    if missing:
+    if missing_moves:
         out.append(
             Deviation(
-                type=DeviationType.MISSING_FILE,
-                affected=tuple(missing),
+                type=DeviationType.MISSING_MOVE,
+                affected=tuple(f"{s} -> {d}" for s, d in missing_moves),
                 reason="auto-detected by verify",
                 detail="",
                 auto=True,
             )
         )
     return out
+
+
+def _auto(dtype: DeviationType, paths: list[str]) -> Deviation:
+    """Build an auto deviation for a path list."""
+    return Deviation(
+        type=dtype,
+        affected=tuple(paths),
+        reason="auto-detected by verify",
+        detail="",
+        auto=True,
+    )
 
 
 def _run_one(spec: dict, deps: Deps) -> CheckResult:
@@ -321,7 +421,7 @@ def _run_one(spec: dict, deps: Deps) -> CheckResult:
 __all__ = [
     "check_architecture_lock",
     "check_compile",
-    "check_roadmap_files",
+    "check_roadmap_changes",
     "check_roadmap_interfaces",
     "check_roadmap_step",
     "compute_auto_deviations",

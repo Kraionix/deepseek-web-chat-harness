@@ -7,10 +7,12 @@ from dataclasses import replace
 import pytest
 
 from dwch.domain.models import (
+    DeleteOp,
     Deviation,
     DeviationType,
-    FileSpec,
+    MoveOp,
     State,
+    WriteOp,
 )
 from dwch.domain.rules import (
     has_blocker,
@@ -97,28 +99,61 @@ def test_is_phase_closed_false_before_close() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# is_substantive
+# ---------------------------------------------------------------------------
+
+
 def test_is_substantive_true_for_code_file() -> None:
     """A step writing a code file is substantive."""
-    specs = [FileSpec(path="src/x.py", content="x = 1\n")]
-    assert is_substantive(specs)
+    ops = [WriteOp(path="src/x.py", content="x = 1\n")]
+    assert is_substantive(ops)
 
 
 def test_is_substantive_false_for_deviations_only() -> None:
     """A step that writes only deviation files is not substantive."""
-    specs = [FileSpec(path=".harness/deviations/step-01.toml", content="")]
-    assert not is_substantive(specs)
+    ops = [WriteOp(path=".harness/deviations/step-01.toml", content="")]
+    assert not is_substantive(ops)
 
 
 def test_is_substantive_exempts_handoff() -> None:
     """Writing only `.harness/handoff.md` is not substantive."""
-    specs = [FileSpec(path=".harness/handoff.md", content="")]
-    assert not is_substantive(specs)
+    ops = [WriteOp(path=".harness/handoff.md", content="")]
+    assert not is_substantive(ops)
 
 
 def test_is_substantive_exempts_summaries() -> None:
     """Writing only a phase summary is not substantive."""
-    specs = [FileSpec(path=".harness/summaries/p1.md", content="")]
-    assert not is_substantive(specs)
+    ops = [WriteOp(path=".harness/summaries/p1.md", content="")]
+    assert not is_substantive(ops)
+
+
+def test_is_substantive_true_for_delete_outside_prefixes() -> None:
+    """A DeleteOp on a code file is substantive."""
+    ops = [DeleteOp(path="src/old.py")]
+    assert is_substantive(ops)
+
+
+def test_is_substantive_true_for_move_outside_prefixes() -> None:
+    """A MoveOp on a code file is substantive."""
+    ops = [MoveOp(src="src/a.py", dst="src/b.py")]
+    assert is_substantive(ops)
+
+
+def test_is_substantive_false_for_delete_inside_prefixes() -> None:
+    """A DeleteOp on a deviation file is not substantive."""
+    ops = [DeleteOp(path=".harness/deviations/step-01.toml")]
+    assert not is_substantive(ops)
+
+
+def test_is_substantive_empty() -> None:
+    """An empty op list is not substantive."""
+    assert not is_substantive([])
+
+
+# ---------------------------------------------------------------------------
+# has_blocker
+# ---------------------------------------------------------------------------
 
 
 def test_has_blocker_true() -> None:
@@ -145,6 +180,11 @@ def test_has_blocker_false() -> None:
     assert not has_blocker([dev])
 
 
+# ---------------------------------------------------------------------------
+# is_state_consistent
+# ---------------------------------------------------------------------------
+
+
 def test_state_consistent_ok() -> None:
     """A populated, valid state is consistent."""
     assert is_state_consistent(_state())
@@ -163,6 +203,11 @@ def test_state_consistent_rejects_empty_phase() -> None:
 def test_state_consistent_rejects_negative_step() -> None:
     """A negative counter is inconsistent."""
     assert not is_state_consistent(_state(current_step=-1))
+
+
+# ---------------------------------------------------------------------------
+# phase_name_error
+# ---------------------------------------------------------------------------
 
 
 def test_phase_name_error_ok() -> None:

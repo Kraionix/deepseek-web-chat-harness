@@ -9,6 +9,7 @@ module only parses, validates, and renders.
 from __future__ import annotations
 
 import hashlib
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -19,7 +20,8 @@ from ..domain.models import (
     RoadmapStep,
     State,
 )
-from ..shared.errors import RoadmapError
+from ..shared.errors import FormatError, RoadmapError
+from ..shared.paths import normalize_rel, safe_path
 from ..shared.toml import list_of_strings, list_of_tables
 from .ports import FilesystemPort
 
@@ -74,16 +76,17 @@ def load(fs: FilesystemPort, path: Path) -> Roadmap:
     return Roadmap(meta=meta, interfaces=interfaces, steps=steps)
 
 
-def validate(roadmap: Roadmap) -> list[str]:
+def validate(roadmap: Roadmap, project_root: Path | None = None) -> list[str]:
     """Return a list of structural problems with `roadmap`.
 
     An empty list means the roadmap is well-formed. The function is
     deliberately structural: it checks numbering, references, graph
     shape, and path safety, not semantics.
 
-    A cycle in `depends_on` cannot occur here: the check that every
-    dependency refers to an earlier step already rules it out. The
-    predicate is therefore not re-checked.
+    `project_root` is optional. When given, every path in `files`,
+    `removes`, `moves`, and `interface.module` is additionally run
+    through `safe_path`, catching symlink escapes and reserved
+    names. When omitted, only the relative-path checks run.
     """
     problems: list[str] = []
 
@@ -112,10 +115,34 @@ def validate(roadmap: Roadmap) -> list[str]:
                 )
             elif dep not in numbers:
                 problems.append(f"step {step.number}: depends_on {dep} does not exist")
+
         for rel in step.files:
             reason = _bad_path(rel)
             if reason is not None:
                 problems.append(f"step {step.number}: file {rel!r}: {reason}")
+            elif project_root is not None:
+                problems.extend(_safe_path_problems(rel, f"step {step.number}: files"))
+
+        for rel in step.removes:
+            reason = _bad_path(rel)
+            if reason is not None:
+                problems.append(f"step {step.number}: removes {rel!r}: {reason}")
+            elif project_root is not None:
+                problems.extend(
+                    _safe_path_problems(rel, f"step {step.number}: removes")
+                )
+
+        for src, dst in step.moves:
+            for label, rel in (("moves.from", src), ("moves.to", dst)):
+                reason = _bad_path(rel)
+                if reason is not None:
+                    problems.append(f"step {step.number}: {label} {rel!r}: {reason}")
+                elif project_root is not None:
+                    problems.extend(
+                        _safe_path_problems(rel, f"step {step.number}: {label}")
+                    )
+
+        problems.extend(_step_set_problems(step))
 
     for iface in roadmap.interfaces:
         if not iface.module:
@@ -125,8 +152,77 @@ def validate(roadmap: Roadmap) -> list[str]:
             problems.append(
                 f"interface {iface.name!r}: module {iface.module!r}: {reason}"
             )
+        elif project_root is not None:
+            problems.extend(
+                _safe_path_problems(iface.module, f"interface {iface.name!r}: module")
+            )
 
     return problems
+
+
+def _step_set_problems(step: RoadmapStep) -> list[str]:
+    """Intersection and uniqueness problems for one step's sets."""
+    problems: list[str] = []
+    files = {normalize_rel(p) for p in step.files}
+    removes = {normalize_rel(p) for p in step.removes}
+    moves_from = {normalize_rel(s) for s, _ in step.moves}
+    moves_to = {normalize_rel(d) for _, d in step.moves}
+
+    if files & removes:
+        problems.append(
+            f"step {step.number}: removes intersects files: "
+            + ", ".join(sorted(files & removes))
+        )
+    if files & moves_from:
+        problems.append(
+            f"step {step.number}: moves.from intersects files: "
+            + ", ".join(sorted(files & moves_from))
+        )
+    if files & moves_to:
+        problems.append(
+            f"step {step.number}: moves.to intersects files: "
+            + ", ".join(sorted(files & moves_to))
+        )
+    if removes & moves_from:
+        problems.append(
+            f"step {step.number}: moves.from intersects removes: "
+            + ", ".join(sorted(removes & moves_from))
+        )
+
+    if len(moves_from) != len(step.moves):
+        problems.append(f"step {step.number}: moves.from values are not unique")
+    if len(moves_to) != len(step.moves):
+        problems.append(f"step {step.number}: moves.to values are not unique")
+
+    for src, dst in step.moves:
+        if normalize_rel(src) == normalize_rel(dst):
+            problems.append(
+                f"step {step.number}: move {src!r} has identical from and to"
+            )
+
+    chained = moves_from & moves_to
+    if chained:
+        problems.append(
+            f"step {step.number}: chained moves (a->b, b->c): "
+            + ", ".join(sorted(chained))
+        )
+
+    return problems
+
+
+def _safe_path_problems(rel: str, label: str) -> list[str]:
+    """Return a single-element list if `safe_path` refuses `rel`."""
+    # `safe_path` needs a root to check escape; use an empty
+    # temporary directory as a placeholder root. The structural
+    # checks (reserved names, control characters, symlinks) still
+    # fire; the escape check compares against a synthetic root and
+    # is a no-op for relative paths.
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            safe_path(rel, Path(tmp).resolve())
+        except FormatError as exc:
+            return [f"{label}: {rel!r}: {exc}"]
+    return []
 
 
 def find_step(roadmap: Roadmap, number: int) -> RoadmapStep | None:
@@ -170,6 +266,8 @@ def render_summary(roadmap: Roadmap, state: State) -> str:
 def render_current(step: RoadmapStep) -> str:
     """Render the full spec of one roadmap step."""
     files = "\n".join(f"  - {p}" for p in step.files) or "  (none)"
+    removes = "\n".join(f"  - {p}" for p in step.removes) or "  (none)"
+    moves = "\n".join(f"  - {s} → {d}" for s, d in step.moves) or "  (none)"
     interfaces = ", ".join(step.interfaces) or "(none)"
     acceptance = "\n".join(f"  - {a}" for a in step.acceptance) or "  (none)"
     depends = ", ".join(str(d) for d in step.depends_on) or "(none)"
@@ -179,6 +277,10 @@ def render_current(step: RoadmapStep) -> str:
         f"Goal: {step.goal}\n"
         f"\n"
         f"Files:\n{files}\n"
+        f"\n"
+        f"Removes:\n{removes}\n"
+        f"\n"
+        f"Moves:\n{moves}\n"
         f"\n"
         f"Interfaces: {interfaces}\n"
         f"Depends on: {depends}\n"
@@ -251,6 +353,9 @@ def _parse_step(item: dict, path: Path) -> RoadmapStep:
         acceptance = list_of_strings(
             item.get("acceptance", []), f"{path}: step {number}.acceptance"
         )
+        removes = list_of_strings(
+            item.get("removes", []), f"{path}: step {number}.removes"
+        )
         depends_raw = item.get("depends_on", [])
         if not isinstance(depends_raw, list):
             raise ValueError(
@@ -265,6 +370,7 @@ def _parse_step(item: dict, path: Path) -> RoadmapStep:
                     f"got {type(d).__name__}"
                 )
             depends_on.append(d)
+        moves = _parse_moves(item.get("moves", []), path, number)
     except ValueError as exc:
         raise RoadmapError(str(exc)) from exc
 
@@ -276,7 +382,38 @@ def _parse_step(item: dict, path: Path) -> RoadmapStep:
         interfaces=tuple(interfaces),
         acceptance=tuple(acceptance),
         depends_on=tuple(depends_on),
+        removes=tuple(removes),
+        moves=tuple(moves),
     )
+
+
+def _parse_moves(raw: object, path: Path, number: int) -> list[tuple[str, str]]:
+    """Parse the `moves` field into a list of `(src, dst)` tuples.
+
+    Each item must be an inline table with string `from` and `to`
+    keys. A bare string is rejected rather than silently ignored.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"{path}: step {number}.moves: expected a list of tables, "
+            f"got {type(raw).__name__}"
+        )
+    out: list[tuple[str, str]] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{path}: step {number}.moves[{i}]: expected a table, "
+                f"got {type(item).__name__}"
+            )
+        src = item.get("from")
+        dst = item.get("to")
+        if not isinstance(src, str) or not isinstance(dst, str):
+            raise ValueError(
+                f"{path}: step {number}.moves[{i}]: "
+                "`from` and `to` must both be strings"
+            )
+        out.append((src, dst))
+    return out
 
 
 __all__ = [

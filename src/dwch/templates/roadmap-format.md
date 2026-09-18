@@ -34,18 +34,55 @@ acceptance = [
 depends_on = []
 ```
 
+## Deletions and renames
+
+Two optional keys make deletions and renames visible to the
+planner. Both default to `[]`.
+
+```toml
+[[steps]]
+number = 3
+title = "Move storage out of models"
+goal = "..."
+files   = ["src/todo/storage.py"]
+removes = ["src/todo/legacy.py"]
+moves = [
+  { from = "src/todo/models.py", to = "src/todo/models/__init__.py" },
+]
+interfaces = ["save", "load"]
+acceptance = []
+depends_on = [1]
+```
+
+`moves` is a list of inline tables `{ from, to }`, not pairs.
+Readable, extensible if a third field ever becomes necessary.
+
 ## Rules
 
-- `[meta].version` is a positive integer. A new roadmap replaces the
-  old one; increment the version. A development session running
-  under v1 keeps its own `roadmap_step`, which is reset when v2 is
-  frozen.
-- `[[interfaces]]` names must be unique and must be referenced by at
-  least one step.
+- `[meta].version` is a positive integer. A new roadmap replaces
+  the old one; increment the version. A development session
+  running under v1 keeps its own `roadmap_step`, which is reset
+  when v2 is frozen.
+- `[[interfaces]]` names must be unique and must be referenced by
+  at least one step.
 - `[[steps]].number` must be `1..N` with no gaps.
 - `depends_on` must reference earlier steps only.
-- `files` are relative to the project root.
+- `files`, `removes`, and `moves` use paths relative to the
+  project root, POSIX-style.
 - `acceptance` is prose. It is shown to the coder but not parsed.
+
+### Intersection rules
+
+Within one step:
+
+- `removes` must not intersect `files`.
+- `moves.from` must not intersect `files`.
+- `moves.to` must not intersect `files`.
+- `moves.from` must not intersect `removes`.
+- `moves.from` values are unique; `moves.to` values are unique.
+- No `from` equals a `to` (no chains `a→b`, `b→c`).
+
+All comparisons are by normalized path.
 
 ## Validation
 

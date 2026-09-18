@@ -1,10 +1,12 @@
 """Parse step messages and render reports.
 
-The step format is fixed and minimal: blocks delimited by
-`<<<FILE:path>>>` and `<<<END>>>`. Everything outside a block is
-ignored. There is no escaping and no nesting; the parser is a
-single forward scan that tracks whether it is inside a block, so a
-literal `<<<FILE:...>>>` line inside content is not a marker.
+The step format has three block kinds, delimited by
+`<<<FILE:path>>>`, `<<<DELETE:path>>>`, and
+`<<<MOVE:src:dst>>>`, each closed by `<<<END>>>`. Everything
+outside a block is ignored. There is no escaping and no nesting;
+the parser is a single forward scan that tracks whether it is
+inside a block, so a literal `<<<FILE:...>>>` line inside content
+is not a marker.
 
 Step numbers are canonicalized here: `1`, `01`, and `001` all name
 the same step, and every command that builds a step filename goes
@@ -18,43 +20,78 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..domain.models import CheckResult, Deviation, FileSpec, Report
+from ..domain.models import (
+    CheckResult,
+    DeleteOp,
+    Deviation,
+    MoveOp,
+    Report,
+    StepOp,
+    WriteOp,
+    op_paths,
+    op_written_paths,
+)
 from ..shared.errors import FormatError
+from ..shared.paths import normalize_rel, safe_path
 
 FILE_OPEN = "<<<FILE:"
+DELETE_OPEN = "<<<DELETE:"
+MOVE_OPEN = "<<<MOVE:"
 FILE_CLOSE = "<<<END>>>"
+
+MAX_FILE_BYTES = 10 * 1024 * 1024
+MAX_MESSAGE_BYTES = 50 * 1024 * 1024
+MAX_SNAPSHOT_TOTAL_BYTES = 50 * 1024 * 1024
+
+# Paths that `DELETE` and `MOVE` may not touch. `FILE` does not
+# consult this list: rewriting `roadmap.toml` during a planning
+# phase is normal, deleting or moving it is not.
+_PROTECTED_EXACT = frozenset(
+    {
+        ".harness/state.toml",
+        ".harness/config.toml",
+        ".harness/roadmap.lock",
+        ".harness/roadmap.toml",
+        ".harness/.gitignore",
+    }
+)
 
 _REPORT_RE = re.compile(r"^report-(\d+)\.txt$")
 
 
-def parse_step_message(text: str) -> list[FileSpec]:
-    """Parse a step message into a list of `FileSpec`.
+def parse_step_message(text: str) -> list[StepOp]:
+    """Parse a step message into a list of `StepOp`.
 
     Pre:  `text` is the raw content of the AI's message.
-    Post: returns a list of `(path, content)` pairs, in the order
-          the blocks appeared. Paths are unique.
-    Raises: `FormatError` on an unclosed block, an empty path, a
-          duplicate path, or no blocks at all.
+    Post: returns a list of ops, in the order the blocks appeared.
+          Every path is unique across every op.
+    Raises: `FormatError` on an oversized message, an unclosed
+          block, an empty path, a duplicate path, a non-empty
+          `DELETE` or `MOVE` body, a `MOVE` without exactly one
+          `:`, an unknown keyword, or no blocks at all.
 
     Trailing whitespace around the marker lines is tolerated: the
     parser compares an `rstrip()`-ed line. A human copying from a
     chat window sometimes leaves a trailing space after
     `<<<END>>>`.
     """
+    if len(text.encode("utf-8")) > MAX_MESSAGE_BYTES:
+        raise FormatError(
+            f"step message is {len(text.encode('utf-8'))} bytes; "
+            f"limit is {MAX_MESSAGE_BYTES}"
+        )
+
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    specs: list[FileSpec] = []
-    seen: set[str] = set()
+    ops: list[StepOp] = []
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.startswith(FILE_OPEN) and line.rstrip().endswith(">>>"):
-            stripped = line.rstrip()
+        stripped = line.rstrip()
+
+        if stripped.startswith(FILE_OPEN) and stripped.endswith(">>>"):
             path = stripped[len(FILE_OPEN) : -3].strip()
             if not path:
                 raise FormatError(f"empty path at line {i + 1}")
-            if path in seen:
-                raise FormatError(f"duplicate path {path!r} at line {i + 1}")
-            seen.add(path)
             i += 1
             buf: list[str] = []
             while i < len(lines) and lines[i].rstrip() != FILE_CLOSE:
@@ -63,39 +100,89 @@ def parse_step_message(text: str) -> list[FileSpec]:
             if i >= len(lines):
                 raise FormatError(f"missing {FILE_CLOSE} for {path!r}")
             content = "\n".join(buf) + "\n" if buf else ""
-            specs.append(FileSpec(path=path, content=content))
+            if len(content.encode("utf-8")) > MAX_FILE_BYTES:
+                raise FormatError(
+                    f"file {path!r} is {len(content.encode('utf-8'))} bytes; "
+                    f"limit is {MAX_FILE_BYTES}"
+                )
+            ops.append(WriteOp(path=path, content=content))
+
+        elif stripped.startswith(DELETE_OPEN) and stripped.endswith(">>>"):
+            path = stripped[len(DELETE_OPEN) : -3].strip()
+            if not path:
+                raise FormatError(f"empty path at line {i + 1}")
+            i += 1
+            while i < len(lines) and lines[i].rstrip() != FILE_CLOSE:
+                if lines[i].strip():
+                    raise FormatError(
+                        f"DELETE body must be empty for {path!r} (line {i + 1})"
+                    )
+                i += 1
+            if i >= len(lines):
+                raise FormatError(f"missing {FILE_CLOSE} for {path!r}")
+            ops.append(DeleteOp(path=path))
+
+        elif stripped.startswith(MOVE_OPEN) and stripped.endswith(">>>"):
+            inner = stripped[len(MOVE_OPEN) : -3]
+            if inner.count(":") != 1:
+                raise FormatError(f"MOVE requires exactly one ':' separator: {inner!r}")
+            src, dst = inner.split(":", 1)
+            src = src.strip()
+            dst = dst.strip()
+            if not src or not dst:
+                raise FormatError(f"MOVE requires two non-empty paths: {inner!r}")
+            i += 1
+            while i < len(lines) and lines[i].rstrip() != FILE_CLOSE:
+                if lines[i].strip():
+                    raise FormatError(
+                        f"MOVE body must be empty for {src!r} (line {i + 1})"
+                    )
+                i += 1
+            if i >= len(lines):
+                raise FormatError(f"missing {FILE_CLOSE} for {src!r}")
+            ops.append(MoveOp(src=src, dst=dst))
+
+        elif (
+            stripped.startswith("<<<") and stripped.endswith(">>>") and ":" in stripped
+        ):
+            raise FormatError(f"unknown block keyword at line {i + 1}: {stripped!r}")
+
         i += 1
-    if not specs:
+
+    if not ops:
         raise FormatError(f"no {FILE_OPEN}...>>> blocks found in the message")
-    return specs
+
+    _check_unique_paths(ops)
+    return ops
 
 
-def validate_paths(specs: list[FileSpec], project_root: Path) -> None:
+def _check_unique_paths(ops: list[StepOp]) -> None:
+    """Reject a step where any path appears in more than one op."""
+    seen: set[str] = set()
+    for op in ops:
+        for p in op_paths(op):
+            norm = normalize_rel(p)
+            if norm in seen:
+                raise FormatError(f"duplicate path {p!r}")
+            seen.add(norm)
+
+
+def validate_paths(ops: list[StepOp], project_root: Path) -> None:
     """Reject unsafe paths before any write happens.
 
-    A path is unsafe if it is absolute, contains `..`, or resolves
-    outside `project_root`. The check runs on all specs before any
-    file is written, so a bad path in spec #5 does not leave specs
-    #1–4 on disk.
+    Every path of every op goes through `safe_path`, the single
+    validator. The check runs on all ops before any file is
+    written, so a bad path in op #5 does not leave ops #1–4 on
+    disk.
     """
-    for spec in specs:
-        # Why: on Windows, `Path("/foo")` has a root but no drive, so
-        # `is_absolute()` returns False. A leading separator still
-        # means "outside the project", so it is rejected explicitly.
-        if spec.path.startswith(("/", "\\")):
-            raise FormatError(f"absolute path not allowed: {spec.path!r}")
-        p = Path(spec.path)
-        if p.is_absolute():
-            raise FormatError(f"absolute path not allowed: {spec.path!r}")
-        if ".." in p.parts:
-            raise FormatError(f"parent traversal not allowed: {spec.path!r}")
-        resolved = (project_root / p).resolve()
-        if not resolved.is_relative_to(project_root.resolve()):
-            raise FormatError(f"path escapes project root: {spec.path!r}")
+    resolved_root = project_root.resolve(strict=False)
+    for op in ops:
+        for p in op_paths(op):
+            safe_path(p, resolved_root)
 
 
-def detect_marker_collision(spec: FileSpec) -> None:
-    """Raise `FormatError` if `spec.content` would break the parser.
+def detect_marker_collision(op: WriteOp) -> None:
+    """Raise `FormatError` if `op.content` would break the parser.
 
     A content that contains the literal `<<<END>>>` on its own line
     (modulo trailing whitespace) would be interpreted as the closing
@@ -106,13 +193,24 @@ def detect_marker_collision(spec: FileSpec) -> None:
     A literal `<<<FILE:...>>>` line inside content is *not* a
     problem: the parser tracks whether it is inside a block, so an
     opening marker only counts when it appears outside one.
+
+    `DELETE` and `MOVE` bodies are empty, so there is nothing to
+    check for them.
     """
-    for line in spec.content.split("\n"):
+    for line in op.content.split("\n"):
         if line.rstrip() == FILE_CLOSE:
             raise FormatError(
-                f"content of {spec.path!r} contains a bare "
+                f"content of {op.path!r} contains a bare "
                 f"{FILE_CLOSE!r} line, which would break the parser"
             )
+
+
+def is_protected(rel: str) -> bool:
+    """True when `rel` is a path `DELETE` or `MOVE` may not touch."""
+    norm = normalize_rel(rel)
+    if norm in _PROTECTED_EXACT:
+        return True
+    return norm == "steps" or norm.startswith("steps/")
 
 
 def format_step(number: int) -> str:
@@ -237,10 +335,18 @@ def summarize_deviation(dev: Deviation) -> str:
 
 
 __all__ = [
+    "DELETE_OPEN",
     "FILE_CLOSE",
     "FILE_OPEN",
+    "MAX_FILE_BYTES",
+    "MAX_MESSAGE_BYTES",
+    "MAX_SNAPSHOT_TOTAL_BYTES",
+    "MOVE_OPEN",
     "detect_marker_collision",
     "format_step",
+    "is_protected",
+    "op_paths",
+    "op_written_paths",
     "parse_step_arg",
     "parse_step_message",
     "render_report",

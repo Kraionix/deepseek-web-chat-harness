@@ -82,8 +82,11 @@ _configure_git_env()
 # `verify.planning_commands` are empty so tests never shell out to
 # ruff; a test that wants a command registers it in `InMemoryProcess`.
 #
-# The 0.3.0 format replaces `bootstrap.recent_reports` with
-# `bootstrap.reports_current_phase`. 0.3.1 removes `paths.phases`.
+# `bootstrap.max_tokens` is deliberately huge. The tests do not
+# exercise the truncation path; the budget must be large enough that
+# a development bootstrap fits with every section present. A test
+# that wants to observe truncation sets a smaller value in its own
+# config.
 MINIMAL_CONFIG = """\
 [harness]
 version = "0.3.0"
@@ -111,7 +114,7 @@ commands = []
 planning_commands = []
 
 [bootstrap]
-max_tokens = 10000
+max_tokens = 50000
 reports_current_phase = 1
 recent_deviations = 10
 include_module_map = false

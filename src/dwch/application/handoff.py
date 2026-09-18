@@ -9,16 +9,13 @@ rewritten; the prose is preserved verbatim.
 and current. It lives here rather than in each command so the three
 cannot drift apart.
 
-Robustness note: the AI is free to rewrite the handoff and may
-produce only one of the two markers, or duplicate a marker. The
-regex-based implementation below collapses every such case to a
-single fresh block; the previous `partition`-based one left the
-stray marker in place and accumulated blocks across calls.
+The scanner is linear. A regex with `.*?` and `DOTALL` is
+quadratic on pathological input (many `BEGIN` with no `END`), and
+the handoff is untrusted AI output.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from ..domain.models import State
@@ -26,17 +23,6 @@ from .ports import FilesystemPort
 
 BEGIN = "<!-- harness:begin -->"
 END = "<!-- harness:end -->"
-
-# A single, non-greedy match of the whole harness block. `DOTALL`
-# lets the body span lines; `re.escape` keeps the marker text from
-# being interpreted as regex. `count=1` on `sub` replaces only the
-# first block, so a duplicated block further down is preserved as
-# prose (and would be re-emitted on the next call — but the AI
-# cannot legally write a second block, and the harness never does).
-_BLOCK_RE = re.compile(
-    re.escape(BEGIN) + r".*?" + re.escape(END),
-    re.DOTALL,
-)
 
 
 def ensure_metadata(
@@ -52,9 +38,7 @@ def ensure_metadata(
       around it is preserved.
     - If a stray marker is present without its pair, or if both
       markers are missing, every marker line is stripped and a fresh
-      block is inserted at the top. This handles a handoff the AI
-      rewrote from scratch and a handoff with a half-deleted block
-      identically, without accumulating stale fragments.
+      block is inserted at the top.
 
     Pre:  `project_root` is a directory; `state` is loaded and
           coherent.
@@ -65,19 +49,29 @@ def ensure_metadata(
         return
     text = fs.read_text(handoff)
 
-    if _BLOCK_RE.search(text):
-        fs.write_text(handoff, _replace_first_block(text, state))
+    span = _find_first_block(text)
+    if span is not None:
+        start, end = span
+        fs.write_text(handoff, text[:start] + _render_block(state) + text[end:])
         return
 
-    # No full block. Remove any stray marker lines the AI may have
-    # left, then prepend a fresh block.
     cleaned = _strip_marker_lines(text)
     fs.write_text(handoff, _render_block(state) + "\n" + cleaned)
 
 
-def _replace_first_block(text: str, state: State) -> str:
-    """Replace the first complete harness block in `text`."""
-    return _BLOCK_RE.sub(lambda _m: _render_block(state), text, count=1)
+def _find_first_block(text: str) -> tuple[int, int] | None:
+    """Return `(start, end)` of the first complete block, or None.
+
+    `start` is the index of `BEGIN`, `end` is the index just past
+    the matching `END`. Linear in `len(text)`; no regex.
+    """
+    begin_idx = text.find(BEGIN)
+    if begin_idx == -1:
+        return None
+    end_idx = text.find(END, begin_idx + len(BEGIN))
+    if end_idx == -1:
+        return None
+    return (begin_idx, end_idx + len(END))
 
 
 def _strip_marker_lines(text: str) -> str:

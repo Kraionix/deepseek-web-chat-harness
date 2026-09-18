@@ -31,6 +31,13 @@ class DeviationType(StrEnum):
 
     `EXTRA_FILE`       — file not listed in `step.files`.
     `MISSING_FILE`     — file listed in `step.files` not written.
+    `EXTRA_REMOVAL`    — file removed, not in `step.removes` or
+                         `step.moves.from`.
+    `MISSING_REMOVAL`  — file in `step.removes` or `step.moves.from`
+                         not removed.
+    `EXTRA_MOVE`       — a `MOVE` op that is not in `step.moves`,
+                         or whose `to` differs.
+    `MISSING_MOVE`     — a pair in `step.moves` with no `MOVE` op.
     `INTERFACE_CHANGE` — public symbol added, removed, or renamed.
     `BUGFIX_PRIOR`     — change to code from a previous step.
     `ASSUMPTION`       — the spec was incomplete; the coder decided.
@@ -40,6 +47,10 @@ class DeviationType(StrEnum):
 
     EXTRA_FILE = "extra-file"
     MISSING_FILE = "missing-file"
+    EXTRA_REMOVAL = "extra-removal"
+    MISSING_REMOVAL = "missing-removal"
+    EXTRA_MOVE = "extra-move"
+    MISSING_MOVE = "missing-move"
     INTERFACE_CHANGE = "interface-change"
     BUGFIX_PRIOR = "bugfix-prior"
     ASSUMPTION = "assumption"
@@ -48,8 +59,8 @@ class DeviationType(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class FileSpec:
-    """One file produced by parsing a step message.
+class WriteOp:
+    """One file to write.
 
     `path` is relative to the project root. `content` is the file
     body verbatim, exactly as it should be written to disk.
@@ -57,6 +68,63 @@ class FileSpec:
 
     path: str
     content: str
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteOp:
+    """One file to delete.
+
+    Only regular files may be deleted. Directories are not
+    supported.
+    """
+
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class MoveOp:
+    """One file rename.
+
+    `src` must exist; `dst` must not. Both paths are relative to
+    the project root.
+    """
+
+    src: str
+    dst: str
+
+
+StepOp = WriteOp | DeleteOp | MoveOp
+
+
+def op_paths(op: StepOp) -> tuple[str, ...]:
+    """Return every path the op touches.
+
+    Used by the uniqueness check, by `validate_paths`, and by
+    `is_substantive`.
+    """
+    if isinstance(op, WriteOp):
+        return (op.path,)
+    if isinstance(op, DeleteOp):
+        return (op.path,)
+    if isinstance(op, MoveOp):
+        return (op.src, op.dst)
+    raise TypeError(f"unknown StepOp type: {type(op).__name__}")
+
+
+def op_written_paths(op: StepOp) -> tuple[str, ...]:
+    """Return only the paths that exist after the op.
+
+    Used by `check_compile`, by `check_roadmap_changes`, and by
+    `verify`'s `missing` computation. A `DeleteOp` contributes
+    nothing; a `MoveOp` contributes its destination.
+    """
+    if isinstance(op, WriteOp):
+        return (op.path,)
+    if isinstance(op, DeleteOp):
+        return ()
+    if isinstance(op, MoveOp):
+        return (op.dst,)
+    raise TypeError(f"unknown StepOp type: {type(op).__name__}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +206,10 @@ class RoadmapStep:
     `number` is unique and positive within a single roadmap version.
     `depends_on` names earlier step numbers; cycles are rejected by
     `roadmap.validate`.
+
+    `removes` lists files the step deletes; `moves` lists
+    `(src, dst)` pairs the step renames. Both default to empty and
+    are additive: an older roadmap without them still parses.
     """
 
     number: int
@@ -147,6 +219,8 @@ class RoadmapStep:
     interfaces: tuple[str, ...]
     acceptance: tuple[str, ...]
     depends_on: tuple[int, ...]
+    removes: tuple[str, ...] = ()
+    moves: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,8 +319,9 @@ class Config:
     """Parsed `.harness/config.toml`.
 
     See `application.config` for the loader and the expected shape of
-    the file. All fields have defaults derived from `templates/config.toml`,
-    so a minimal config works without all sections present.
+    the file. All fields have defaults derived from
+    `templates/config.toml`, so a minimal config works without all
+    sections present.
     """
 
     harness_version: str
@@ -320,12 +395,13 @@ __all__ = [
     "BootstrapResult",
     "CheckResult",
     "Config",
+    "DeleteOp",
     "Deviation",
     "DeviationType",
-    "FileSpec",
     "Lock",
     "LockEntry",
     "ModuleInfo",
+    "MoveOp",
     "PhaseKind",
     "ProcessResult",
     "Report",
@@ -334,5 +410,9 @@ __all__ = [
     "RoadmapMeta",
     "RoadmapStep",
     "State",
+    "StepOp",
     "SymbolInfo",
+    "WriteOp",
+    "op_paths",
+    "op_written_paths",
 ]

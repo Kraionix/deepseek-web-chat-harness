@@ -140,6 +140,17 @@ class GitPort(Protocol):
     def log_oneline(self, cwd: Path, n: int) -> list[str]: ...
     def checkout_paths(self, cwd: Path, ref: str, paths: list[str]) -> None: ...
 
+    def ls_files(self, cwd: Path, path: str | None = None) -> list[str]:
+        """Return paths tracked by git.
+
+        With `path`, only entries matching that path are returned.
+        An empty list means the path is not tracked. Used by
+        `apply` to tell tracked files (restorable with
+        `git checkout HEAD`) from untracked ones (restorable only
+        from an in-memory snapshot).
+        """
+        ...
+
 
 class TokenCounterPort(Protocol):
     """Token counting for accurate context sizing.

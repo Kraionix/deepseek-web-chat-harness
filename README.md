@@ -107,17 +107,18 @@ Close the chat, start the next phase, paste a fresh bootstrap.
 
 - `.harness/config.toml` — user-editable configuration.
 - `.harness/state.toml` — current phase, kind, step counters.
-- `.harness/session-protocol.md`, `step-format.md`, `report-format.md`,
-  `planning-handoff.md`, `development-handoff.md`,
-  `roadmap-format.md`, `deviation-format.md`, `toolbox.md` —
-  protocol documents included in every bootstrap.
+- `.harness/session-protocol.md`, `step-format.md`,
+  `report-format.md`, `planning-handoff.md`,
+  `development-handoff.md`, `roadmap-format.md`,
+  `deviation-format.md`, `toolbox.md` — protocol documents
+  included in every bootstrap.
 - `.harness/data/deepseek_tokenizer.json` — downloaded tokenizer.
 - `.harness/.gitignore` — ignores only `data/`.
 - `steps/.gitignore` — makes `steps/` self-ignoring.
 
 `.harness/` (except `data/`) and `steps/` are meant to be committed
-together with the project: they are the session's portable state and
-its artifacts. The tokenizer file is local cache.
+together with the project: they are the session's portable state
+and its artifacts. The tokenizer file is local cache.
 
 `.harness/roadmap.toml` appears only after a planning phase writes
 it. `.harness/roadmap.lock` appears only after `close --freeze`.
@@ -125,8 +126,9 @@ it. `.harness/roadmap.lock` appears only after `close --freeze`.
 
 `dwch init --force` regenerates the files the harness owns and can
 safely rebuild: `config.toml`, the shipped templates, and the
-tokenizer cache. It does not touch `state.toml`, `.harness/.gitignore`,
-or `.harness/handoff.md`, because those carry session-local state.
+tokenizer cache. It does not touch `state.toml`,
+`.harness/.gitignore`, or `.harness/handoff.md`, because those
+carry session-local state.
 
 ## The twelve commands
 
@@ -135,7 +137,7 @@ or `.harness/handoff.md`, because those carry session-local state.
 | `dwch init` | Install harness into the current project. |
 | `dwch health` | Check environment and project state. |
 | `dwch bootstrap` | Build the opening message for a new chat. |
-| `dwch apply NN` | Parse a step message and write its files. |
+| `dwch apply NN` | Parse a step message and execute its ops. |
 | `dwch apply summary` | Write the current phase's summary. |
 | `dwch verify NN` | Run checks, commit, produce the report. |
 | `dwch close` | Finalize the phase, optionally freeze the roadmap. |
@@ -170,15 +172,26 @@ existing file; if you need to rewrite one, delete it first.
 
 ## Step message format
 
-The AI's reply for one step is one or more blocks of the form
-&lt;&lt;&lt;FILE:relative/path.py&gt;&gt;&gt;, with the file content
-verbatim, closed by a line containing only
+A step message contains one or more blocks. Three block kinds
+exist: file, delete, and move.
+
+A file block opens with
+&lt;&lt;&lt;FILE:relative/path.py&gt;&gt;&gt;, with the file
+content verbatim, and closes with a line containing only
 &lt;&lt;&lt;END&gt;&gt;&gt;.
 
-The AI's reply for a phase summary is exactly one block:
-&lt;&lt;&lt;FILE:.harness/summaries/{phase}.md&gt;&gt;&gt;, with the
-summary text, closed by a line containing only
-&lt;&lt;&lt;END&gt;&gt;&gt;.
+A delete block opens with
+&lt;&lt;&lt;DELETE:relative/path.py&gt;&gt;&gt;, with an empty
+body (whitespace only), and closes with the end marker.
 
-Trailing whitespace after a marker line is tolerated: a line whose
-stripped form is the marker is recognized.
+A move block opens with
+&lt;&lt;&lt;MOVE:relative/from.py:relative/to.py&gt;&gt;&gt;,
+with an empty body, and closes with the end marker. `MOVE` takes
+exactly two paths separated by a single colon.
+
+Every path is checked before any write: relative, no `..`, no
+symlink components, no reserved names. A step that touches a
+tracked file with uncommitted changes is refused.
+
+The AI's reply for a phase summary is exactly one file block for
+`.harness/summaries/{phase}.md`.

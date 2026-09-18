@@ -104,5 +104,17 @@ class CliGit:
         with contextlib.suppress(GitError):
             self._run(cwd, "checkout", ref, "--", *paths)
 
+    def ls_files(self, cwd: Path, path: str | None = None) -> list[str]:
+        """Return paths tracked by git.
+
+        With `path`, only entries matching that path are returned.
+        An empty list means the path is not tracked.
+        """
+        args = ["ls-files"]
+        if path:
+            args.extend(["--", path])
+        out = self._run(cwd, *args)
+        return [line for line in out.splitlines() if line.strip()]
+
 
 __all__ = ["CliGit"]

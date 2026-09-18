@@ -20,14 +20,24 @@ from .application.commands import COMMANDS
 from .application.config import load_config
 from .application.deps import Deps
 from .shared.errors import HarnessError
+from .shared.paths import check_safe_root
 
 
 def main(argv: list[str] | None = None) -> int:
     """Parse argv and run the requested command. Returns an exit code."""
+    project_root = Path.cwd()
+
+    # Refuse to operate at a filesystem root, in a system directory,
+    # in the home directory, or on a UNC/device path. The check runs
+    # before parsing: a bad root is reported before anything else,
+    # including `--help`.
+    refusal = check_safe_root(project_root)
+    if refusal is not None:
+        print(f"error: {refusal}", file=sys.stderr)
+        return 2
+
     parser = _build_parser()
     args = parser.parse_args(argv)
-
-    project_root = Path.cwd()
 
     # Adapters are constructed once; the tokenizer path is passed
     # to `init` even before the harness is initialized, because the

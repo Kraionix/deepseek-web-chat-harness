@@ -9,9 +9,10 @@ from __future__ import annotations
 from .models import (
     Deviation,
     DeviationType,
-    FileSpec,
     PhaseKind,
     State,
+    StepOp,
+    op_paths,
 )
 
 _VALID_PHASE_KINDS = frozenset(
@@ -86,21 +87,26 @@ def is_phase_closed(state: State) -> bool:
     return state.last_closed >= state.last_opened
 
 
-def is_substantive(specs: list[FileSpec]) -> bool:
-    """True when at least one spec is real work, not a meta-artifact.
+def is_substantive(ops: list[StepOp]) -> bool:
+    """True when at least one op is real work, not a meta-artifact.
 
     Deviation files, phase summaries, and handoff rewrites are
     process artifacts. A step that touches only those does not
     advance `roadmap_step`: it reports, blocks, or reorganizes, but
     it does not deliver.
+
+    A `DeleteOp` or `MoveOp` with a path outside the exempted
+    prefixes is substantive: a step that only deletes a file
+    advances the roadmap.
     """
-    for spec in specs:
-        path = spec.path.replace("\\", "/")
-        if path in _NON_SUBSTANTIVE_EXACT:
-            continue
-        if path.startswith(_NON_SUBSTANTIVE_PREFIXES):
-            continue
-        return True
+    for op in ops:
+        for path in op_paths(op):
+            norm = path.replace("\\", "/")
+            if norm in _NON_SUBSTANTIVE_EXACT:
+                continue
+            if norm.startswith(_NON_SUBSTANTIVE_PREFIXES):
+                continue
+            return True
     return False
 
 

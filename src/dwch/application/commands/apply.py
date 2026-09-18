@@ -1,14 +1,13 @@
-"""`dwch apply` — write the files of a step, or the phase summary.
+"""`dwch apply` — write, delete, or move the files of a step.
 
 Two forms share one command:
 
-- `dwch apply NN` — parse a step message and write its files.
+- `dwch apply NN` — parse a step message and execute its ops.
 - `dwch apply summary` — write the current phase's summary.
 
 In both forms the message is read from the clipboard, or from
 `--from-file`. Before any file is written, the entire message is
-parsed and every path is validated. On any error, nothing is
-written.
+parsed and every path is validated.
 
 A step's raw message is saved to `steps/{phase}/step-NN.txt` for
 the record, even when parsing fails. This makes a failed apply
@@ -31,21 +30,47 @@ from __future__ import annotations
 import contextlib
 import sys
 from argparse import Namespace
+from dataclasses import dataclass
 from pathlib import Path
 
+from ...domain.models import (
+    DeleteOp,
+    MoveOp,
+    StepOp,
+    WriteOp,
+    op_paths,
+)
 from ...domain.rules import is_unset_phase
 from ...shared.errors import FormatError, HarnessError
+from ...shared.paths import normalize_rel, safe_path
 from ..config import load_config
 from ..deps import Deps
 from ..format import (
+    MAX_FILE_BYTES,
+    MAX_SNAPSHOT_TOTAL_BYTES,
     detect_marker_collision,
     format_step,
+    is_protected,
     parse_step_arg,
     parse_step_message,
     validate_paths,
 )
 from ..handoff import ensure_metadata
 from ..state import load_state
+
+
+@dataclass
+class _OpRecord:
+    """Per-op state captured before the op was applied.
+
+    Used by rollback. `snapshot` is the old content, present only
+    when the op overwrote or deleted an untracked file.
+    """
+
+    op: StepOp
+    existed_before: bool
+    was_tracked: bool
+    snapshot: str | None
 
 
 def cmd_apply(args: Namespace, deps: Deps) -> int:
@@ -98,10 +123,15 @@ def _apply_step(args: Namespace, deps: Deps) -> int:
     deps.fs.write_text(step_file, step_text)
 
     try:
-        specs = parse_step_message(step_text)
-        validate_paths(specs, deps.project_root)
-        for spec in specs:
-            detect_marker_collision(spec)
+        ops = parse_step_message(step_text)
+        validate_paths(ops, deps.project_root)
+        for op in ops:
+            if isinstance(op, WriteOp):
+                detect_marker_collision(op)
+        _check_protected_paths(ops)
+        _check_preconditions(ops, deps)
+        _check_snapshot_limits(ops, deps)
+        _check_dirty_tracked(ops, deps)
     except FormatError as exc:
         print(f"parse error: {exc}", file=sys.stderr)
         print(f"raw message saved: {step_file}", file=sys.stderr)
@@ -111,51 +141,274 @@ def _apply_step(args: Namespace, deps: Deps) -> int:
         print("--- end preview ---", file=sys.stderr)
         return 1
 
-    written: list[tuple[str, bool]] = []
+    applied: list[_OpRecord] = []
+    failure: HarnessError | None = None
     try:
-        for spec in specs:
-            target = deps.project_root / spec.path
-            existed = deps.fs.exists(target)
-            deps.fs.mkdir(target.parent, parents=True)
-            deps.fs.write_text(target, spec.content)
-            written.append((spec.path, existed))
+        for op in ops:
+            record = _apply_op(op, deps)
+            applied.append(record)
     except HarnessError as exc:
-        _rollback_written(deps, written)
-        print(f"error writing files: {exc}", file=sys.stderr)
-        print("partial writes were rolled back", file=sys.stderr)
-        return 2
+        failure = exc
+        _rollback(deps, applied)
 
     # Invariant: after a step, the harness block in handoff.md is
     # present and current, even if the AI rewrote the surrounding
-    # prose without it.
-    ensure_metadata(deps.fs, deps.project_root, state)
+    # prose without it. Only on success: a rolled-back step should
+    # leave the handoff as it was.
+    if failure is None:
+        ensure_metadata(deps.fs, deps.project_root, state)
 
     log_lines = [
         f"step:  {tag}",
         f"phase: {state.current_phase}",
         f"saved: {step_file.relative_to(deps.project_root).as_posix()}",
-        f"files: {len(written)}",
+        f"ops: {len(applied)}",
     ]
-    for path, existed in written:
-        verb = "overwrote" if existed else "wrote"
-        log_lines.append(f"  {verb} {path}")
+    for record in applied:
+        op = record.op
+        if isinstance(op, WriteOp):
+            verb = "overwrote" if record.existed_before else "wrote"
+            log_lines.append(f"  {verb} {op.path}")
+        elif isinstance(op, DeleteOp):
+            log_lines.append(f"  deleted {op.path}")
+        elif isinstance(op, MoveOp):
+            log_lines.append(f"  moved {op.src} → {op.dst}")
+    if failure is not None:
+        log_lines.append(f"rollback: {failure}")
+        for record in reversed(applied):
+            log_lines.append(f"  restored {_op_label(record.op)}")
     log_text = "\n".join(log_lines) + "\n"
     deps.fs.write_text(steps_dir / f"apply-{tag}.log", log_text)
     sys.stdout.write(log_text)
+
+    if failure is not None:
+        print(f"error writing files: {failure}", file=sys.stderr)
+        print("partial writes were rolled back", file=sys.stderr)
+        return 2
     return 0
+
+
+def _op_label(op: StepOp) -> str:
+    """A short label for the rollback log line."""
+    if isinstance(op, WriteOp):
+        return op.path
+    if isinstance(op, DeleteOp):
+        return op.path
+    if isinstance(op, MoveOp):
+        return f"{op.src} → {op.dst}"
+    return "?"
+
+
+def _check_protected_paths(ops: list[StepOp]) -> None:
+    """Refuse `DELETE` or `MOVE` on a protected path."""
+    for op in ops:
+        if isinstance(op, DeleteOp):
+            if is_protected(op.path):
+                raise FormatError(f"cannot delete protected path: {op.path}")
+        elif isinstance(op, MoveOp):
+            if is_protected(op.src):
+                raise FormatError(f"cannot move protected path: {op.src}")
+            if is_protected(op.dst):
+                raise FormatError(f"cannot move to protected path: {op.dst}")
+
+
+def _check_preconditions(ops: list[StepOp], deps: Deps) -> None:
+    """Every precondition that does not depend on the write order.
+
+    - `WriteOp`: the target must not be an existing directory.
+    - `DeleteOp`: the target exists, is a file, and is tracked.
+    - `MoveOp`: `src` exists and is a file; `dst` does not exist.
+    """
+    resolved_root = deps.project_root.resolve(strict=False)
+    for op in ops:
+        if isinstance(op, WriteOp):
+            target = safe_path(op.path, resolved_root)
+            if deps.fs.is_dir(target):
+                raise FormatError(
+                    f"cannot write {op.path!r}: a directory exists at that path"
+                )
+        elif isinstance(op, DeleteOp):
+            target = safe_path(op.path, resolved_root)
+            if not deps.fs.is_file(target):
+                raise FormatError(f"cannot delete {op.path!r}: not a file")
+            if not _is_tracked(deps, op.path):
+                raise FormatError(
+                    f"cannot delete untracked file {op.path!r}: "
+                    "only tracked files may be deleted"
+                )
+        elif isinstance(op, MoveOp):
+            src = safe_path(op.src, resolved_root)
+            dst = safe_path(op.dst, resolved_root)
+            if not deps.fs.is_file(src):
+                raise FormatError(f"cannot move {op.src!r}: not a file")
+            if deps.fs.exists(dst):
+                raise FormatError(
+                    f"cannot move to {op.dst!r}: destination already exists"
+                )
+
+
+def _check_snapshot_limits(ops: list[StepOp], deps: Deps) -> None:
+    """Refuse a step whose snapshot would exceed the memory limits."""
+    resolved_root = deps.project_root.resolve(strict=False)
+    total = 0
+    count = 0
+    for op in ops:
+        if not isinstance(op, WriteOp):
+            continue
+        target = safe_path(op.path, resolved_root)
+        if not deps.fs.is_file(target):
+            continue
+        if _is_tracked(deps, op.path):
+            continue
+        content = deps.fs.read_text(target)
+        size = len(content.encode("utf-8"))
+        if size > MAX_FILE_BYTES:
+            raise FormatError(
+                f"existing untracked file {op.path} is {size} bytes; "
+                f"limit is {MAX_FILE_BYTES}"
+            )
+        total += size
+        count += 1
+
+    if total > MAX_SNAPSHOT_TOTAL_BYTES:
+        mib = total // (1024 * 1024)
+        limit_mib = MAX_SNAPSHOT_TOTAL_BYTES // (1024 * 1024)
+        raise FormatError(
+            f"step overwrites {count} untracked files totaling {mib} MiB; "
+            f"snapshot limit is {limit_mib} MiB; "
+            "commit them first or split the step"
+        )
+
+
+def _check_dirty_tracked(ops: list[StepOp], deps: Deps) -> None:
+    """Refuse a step that touches a tracked file with uncommitted changes."""
+    try:
+        lines = deps.git.status_short(deps.project_root)
+    except HarnessError:
+        return
+
+    modified: set[str] = set()
+    for line in lines:
+        if line.startswith("??"):
+            continue
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        modified.add(normalize_rel(path))
+
+    touched: set[str] = set()
+    for op in ops:
+        for p in op_paths(op):
+            touched.add(normalize_rel(p))
+
+    overlap = touched & modified
+    if overlap:
+        raise FormatError(
+            "uncommitted changes in: "
+            + ", ".join(sorted(overlap))
+            + "; commit or stash first"
+        )
+
+
+def _apply_op(op: StepOp, deps: Deps) -> _OpRecord:
+    """Execute one op and return the state needed to undo it."""
+    resolved_root = deps.project_root.resolve(strict=False)
+
+    if isinstance(op, WriteOp):
+        target = safe_path(op.path, resolved_root)
+        existed = deps.fs.is_file(target)
+        tracked = _is_tracked(deps, op.path)
+        snapshot = None
+        if existed and not tracked:
+            snapshot = deps.fs.read_text(target)
+        deps.fs.mkdir(target.parent, parents=True)
+        deps.fs.write_text(target, op.content)
+        return _OpRecord(
+            op=op, existed_before=existed, was_tracked=tracked, snapshot=snapshot
+        )
+
+    if isinstance(op, DeleteOp):
+        target = safe_path(op.path, resolved_root)
+        tracked = _is_tracked(deps, op.path)
+        snapshot = None
+        if not tracked:
+            snapshot = deps.fs.read_text(target)
+        deps.fs.unlink(target)
+        return _OpRecord(
+            op=op, existed_before=True, was_tracked=tracked, snapshot=snapshot
+        )
+
+    if isinstance(op, MoveOp):
+        src = safe_path(op.src, resolved_root)
+        dst = safe_path(op.dst, resolved_root)
+        deps.fs.mkdir(dst.parent, parents=True)
+        deps.fs.rename(src, dst)
+        return _OpRecord(op=op, existed_before=True, was_tracked=False, snapshot=None)
+
+    raise TypeError(f"unknown StepOp type: {type(op).__name__}")
+
+
+def _rollback(deps: Deps, applied: list[_OpRecord]) -> None:
+    """Undo the applied ops in reverse order.
+
+    Tracked files are restored with one batched `git checkout`.
+    Files that did not exist before the apply are removed.
+    Untracked files that were overwritten or deleted are restored
+    from the in-memory snapshot. A `MOVE` is reversed with a
+    `rename`.
+    """
+    resolved_root = deps.project_root.resolve(strict=False)
+    tracked_paths: list[str] = []
+
+    for record in reversed(applied):
+        op = record.op
+        with contextlib.suppress(HarnessError):
+            if isinstance(op, WriteOp):
+                target = safe_path(op.path, resolved_root)
+                if not record.existed_before:
+                    if deps.fs.exists(target):
+                        deps.fs.unlink(target)
+                elif record.was_tracked:
+                    tracked_paths.append(op.path)
+                else:
+                    deps.fs.write_text(target, record.snapshot or "")
+            elif isinstance(op, DeleteOp):
+                if record.was_tracked:
+                    tracked_paths.append(op.path)
+                else:
+                    target = safe_path(op.path, resolved_root)
+                    deps.fs.write_text(target, record.snapshot or "")
+            elif isinstance(op, MoveOp):
+                src = safe_path(op.src, resolved_root)
+                dst = safe_path(op.dst, resolved_root)
+                if deps.fs.exists(dst):
+                    deps.fs.rename(dst, src)
+
+    if tracked_paths:
+        with contextlib.suppress(HarnessError):
+            deps.git.checkout_paths(deps.project_root, "HEAD", tracked_paths)
+
+
+def _is_tracked(deps: Deps, rel_path: str) -> bool:
+    """True when `rel_path` is in the git index."""
+    try:
+        out = deps.git.ls_files(deps.project_root, rel_path)
+    except HarnessError:
+        return False
+    return bool(out)
 
 
 def _apply_summary(args: Namespace, deps: Deps) -> int:
     """Write the current phase's summary. Returns 0, 1, or 2.
 
     Pre:  an active phase exists; the clipboard or `--from-file`
-          holds exactly one file block whose normalized path equals
+          holds exactly one FILE block whose normalized path equals
           `.harness/summaries/{phase}.md`; no summary for this phase
           exists on disk yet.
     Post: the summary file and the raw message are on disk. State is
           unchanged; `dwch close` records the summary afterwards.
-    Raises: never. Errors are printed and converted into an exit
-          code.
     """
     try:
         config = load_config(deps.fs, deps.project_root)
@@ -183,21 +436,27 @@ def _apply_summary(args: Namespace, deps: Deps) -> int:
         return 1
 
     try:
-        specs = parse_step_message(summary_text)
-        validate_paths(specs, deps.project_root)
+        ops = parse_step_message(summary_text)
+        validate_paths(ops, deps.project_root)
     except FormatError as exc:
         print(f"parse error: {exc}", file=sys.stderr)
         return 1
 
     expected = f".harness/summaries/{state.current_phase}.md"
-    if len(specs) != 1:
+    if len(ops) != 1:
         print(
             f"error: summary message must contain exactly one file block "
-            f"for {expected}, got {len(specs)}",
+            f"for {expected}, got {len(ops)}",
             file=sys.stderr,
         )
         return 1
-    actual = specs[0].path.replace("\\", "/")
+    if not isinstance(ops[0], WriteOp):
+        print(
+            f"error: summary must be a single FILE block; got {type(ops[0]).__name__}",
+            file=sys.stderr,
+        )
+        return 1
+    actual = normalize_rel(ops[0].path)
     if actual != expected:
         print(
             f"error: summary block path must be {expected}, got {actual}",
@@ -220,7 +479,7 @@ def _apply_summary(args: Namespace, deps: Deps) -> int:
     deps.fs.write_text(steps_dir / "summary.txt", summary_text)
 
     deps.fs.mkdir(summary_path.parent, parents=True)
-    deps.fs.write_text(summary_path, specs[0].content)
+    deps.fs.write_text(summary_path, ops[0].content)
 
     print(f"wrote: {expected}")
     print("next: dwch close")
@@ -275,28 +534,6 @@ def _ensure_steps_gitignore(deps: Deps, steps_root: Path) -> None:
         gitignore,
         "# Session artifacts: step messages, apply logs, reports.\n*\n!.gitignore\n",
     )
-
-
-def _rollback_written(deps: Deps, written: list[tuple[str, bool]]) -> None:
-    """Best-effort rollback of files written before a failure.
-
-    Files that existed before the apply are restored from `HEAD`;
-    files that did not are removed. Empty directories created by
-    `mkdir(parents=True)` are left behind — removing them safely
-    would require knowing which were created by this call, and the
-    cost of leaving an empty directory is nil.
-    """
-    tracked = [p for p, existed in written if existed]
-    new_files = [p for p, existed in written if not existed]
-
-    if tracked:
-        with contextlib.suppress(HarnessError):
-            deps.git.checkout_paths(deps.project_root, "HEAD", tracked)
-
-    for rel in new_files:
-        target = deps.project_root / rel
-        with contextlib.suppress(HarnessError):
-            deps.fs.unlink(target)
 
 
 __all__ = ["cmd_apply"]
