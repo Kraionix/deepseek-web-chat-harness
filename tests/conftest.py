@@ -1,24 +1,10 @@
 """Shared fixtures for the test suite.
 
-The strategy comes from the 0.2.1 handoff: use real adapters on
-`tmp_path` instead of building an in-memory filesystem. Three ports
-are cheap enough to fake (clipboard, process, tokenizer); the
-filesystem and git ports go through their real adapters.
-
-Speed comes from three choices, all introduced in 0.3.2:
-
-- Git identity is set through environment variables at conftest
-  import time, so no test pays for `git config user.email`.
-- A session-scoped template repository is created once and
-  `copytree`-d into each test's `tmp_path`, replacing the six
-  subprocesses (`init`, three `config`, `add`, `commit`) that used
-  to run per test.
-- `core.autocrlf=false` is applied through `GIT_CONFIG_*` rather
-  than written to each repository.
-
-`broken_deps` is `deps` with a git port whose `commit_all` always
-raises: used by tests that assert a lifecycle command restores
-state when the commit fails.
+Real adapters on `tmp_path` for filesystem and git; small fakes for
+clipboard, process, and tokenizer. Git identity and `core.autocrlf`
+come from environment variables set at conftest import time, and a
+session-scoped template repository is `copytree`-d into each test,
+so no test pays for `git init` or `git config`.
 """
 
 from __future__ import annotations
@@ -27,6 +13,7 @@ import contextlib
 import os
 import shutil
 import subprocess
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
@@ -45,13 +32,7 @@ from tests.fakes import (
 
 
 def _append_git_config(key: str, value: str) -> None:
-    """Add one `git -c` style setting to the inherited environment.
-
-    `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_<n>` + `GIT_CONFIG_VALUE_<n>`
-    is the mechanism git 2.31 and later use to read config from the
-    environment. Appending rather than overwriting respects any
-    `GIT_CONFIG_*` the user already exported.
-    """
+    """Add one `git -c` style setting to the inherited environment."""
     count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
     os.environ["GIT_CONFIG_COUNT"] = str(count + 1)
     os.environ[f"GIT_CONFIG_KEY_{count}"] = key
@@ -59,19 +40,11 @@ def _append_git_config(key: str, value: str) -> None:
 
 
 def _configure_git_env() -> None:
-    """Configure git for the whole test session via environment.
-
-    Runs once, at conftest import. Every `subprocess.run(["git", ...])`
-    the tests spawn inherits these, so no test calls `git config`.
-    `setdefault` leaves a user's own identity alone when they run the
-    suite locally.
-    """
+    """Configure git for the whole test session via environment."""
     os.environ.setdefault("GIT_AUTHOR_NAME", "Test")
     os.environ.setdefault("GIT_AUTHOR_EMAIL", "test@example.com")
     os.environ.setdefault("GIT_COMMITTER_NAME", "Test")
     os.environ.setdefault("GIT_COMMITTER_EMAIL", "test@example.com")
-    # Line endings must be stable across hosts: the suite compares
-    # file contents and hashes.
     _append_git_config("core.autocrlf", "false")
 
 
@@ -80,16 +53,13 @@ _configure_git_env()
 
 # Minimal config that `load_config` accepts. `verify.commands` and
 # `verify.planning_commands` are empty so tests never shell out to
-# ruff; a test that wants a command registers it in `InMemoryProcess`.
-#
-# `bootstrap.max_tokens` is deliberately huge. The tests do not
-# exercise the truncation path; the budget must be large enough that
-# a development bootstrap fits with every section present. A test
-# that wants to observe truncation sets a smaller value in its own
-# config.
+# ruff; a test that wants a command registers it in
+# `InMemoryProcess`. `bootstrap.max_tokens` is huge so a full
+# bootstrap fits without truncation; tests that exercise truncation
+# override it.
 MINIMAL_CONFIG = """\
 [harness]
-version = "0.3.0"
+version = "0.4.0"
 
 [project]
 name = "test-project"
@@ -102,12 +72,11 @@ essential = []
 references = []
 architecture = ["docs/architecture.md"]
 map_root = ""
+notes = ".harness/notes.md"
 
-[roadmap]
-path = ".harness/roadmap.toml"
-lock_path = ".harness/roadmap.lock"
+[plan]
+path = ".harness/plan.toml"
 deviations_path = ".harness/deviations"
-lock_required = false
 
 [verify]
 commands = []
@@ -129,29 +98,13 @@ max_tokens = 6000
 
 
 def _run_git(cwd: Path, *args: str) -> None:
-    """Run a git command in `cwd`, raising on failure.
-
-    `capture_output=True` keeps the git chatter out of the test's
-    stdout; a failure still surfaces with the command's stderr in
-    the traceback. Identity and `core.autocrlf` come from the
-    environment, not from the repository.
-    """
-    subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
+    """Run a git command in `cwd`, raising on failure."""
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
 @pytest.fixture(scope="session")
 def _git_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A git repository with one commit, built once per session.
-
-    `project_root` copies this directory into each test's
-    `tmp_path`. Four subprocesses per session replace six per test;
-    the per-test cost drops to a `shutil.copytree`.
-    """
+    """A git repository with one commit, built once per session."""
     root = tmp_path_factory.mktemp("git-template")
     _run_git(root, "init", "-q")
     (root / "README.md").write_text("# project\n", encoding="utf-8")
@@ -161,13 +114,7 @@ def _git_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _make_writable(root: Path) -> None:
-    """Clear read-only bits left by `copytree`.
-
-    Git creates loose objects as read-only on POSIX. On Windows,
-    `shutil.copytree` preserves that bit, and a later `git add` or
-    `git reset` may refuse to touch the copy. Clearing the bit is
-    cheap and keeps the tests portable.
-    """
+    """Clear read-only bits left by `copytree`."""
     for dirpath, dirnames, filenames in os.walk(root):
         for name in dirnames:
             with contextlib.suppress(OSError):
@@ -179,13 +126,7 @@ def _make_writable(root: Path) -> None:
 
 @pytest.fixture
 def project_root(tmp_path: Path, _git_template: Path) -> Path:
-    """A real git repository with a first commit.
-
-    Copies the session-scoped template into `tmp_path / "repo"`.
-    The subdirectory keeps the path short on Windows and leaves
-    `tmp_path` free for tests that want to create sibling
-    directories (`test_health` does).
-    """
+    """A real git repository with a first commit."""
     dest = tmp_path / "repo"
     shutil.copytree(_git_template, dest)
     _make_writable(dest)
@@ -196,17 +137,16 @@ def project_root(tmp_path: Path, _git_template: Path) -> Path:
 def harness_root(project_root: Path) -> Path:
     """`project_root` with a minimal `.harness/` and a fresh state.
 
-    Writes a config `load_config` accepts, a stub `handoff.md`, and
-    a state file. Does not run `init`: no tokenizer is downloaded
-    and no templates are copied, because most tests do not need
-    either.
+    Writes a config `load_config` accepts, the real `contract.md`
+    from the package, and a state file. Does not run `init`: no
+    tokenizer is downloaded.
     """
     harness = project_root / ".harness"
     harness.mkdir(exist_ok=True)
     (harness / "config.toml").write_text(MINIMAL_CONFIG, encoding="utf-8")
-    (harness / "handoff.md").write_text(
-        "<!-- harness:begin -->\n<!-- harness:end -->\n",
-        encoding="utf-8",
+    contract = files("dwch.templates") / "contract.md"
+    (harness / "contract.md").write_text(
+        contract.read_text(encoding="utf-8"), encoding="utf-8"
     )
     save_state(LocalFilesystem(), project_root, initial_state())
     return project_root
@@ -214,12 +154,7 @@ def harness_root(project_root: Path) -> Path:
 
 @pytest.fixture
 def deps(project_root: Path) -> Deps:
-    """`Deps` with real fs and git, fakes for clipboard/process/counter.
-
-    `CliGit` always gets a real subprocess runner: git operations
-    must be exercised for real. `deps.process` is the fake, so
-    configured verify commands do not shell out.
-    """
+    """`Deps` with real fs and git, fakes for clipboard/process/counter."""
     return Deps(
         fs=LocalFilesystem(),
         clipboard=InMemoryClipboard(),
@@ -232,13 +167,7 @@ def deps(project_root: Path) -> Deps:
 
 @pytest.fixture
 def broken_deps(deps: Deps) -> Deps:
-    """`deps` with a git port whose `commit_all` always raises.
-
-    Every other method is the real implementation: reads
-    (`is_clean`, `status_short`, `try_head`, `last_commit_subject`)
-    behave as they do in production. Only the write that the
-    lifecycle commands perform is broken.
-    """
+    """`deps` with a git port whose `commit_all` always raises."""
     return Deps(
         fs=deps.fs,
         clipboard=deps.clipboard,

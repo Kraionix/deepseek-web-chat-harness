@@ -28,10 +28,9 @@ All three must pass. CI runs the same on Python 3.11 and 3.12, with
 ## Test speed
 
 The suite parallelizes through `pytest-xdist`. `-n 4` matches the
-CI job; on a laptop it is a safe default, and on a machine with
-more cores `-n auto` usually helps but is likelier to hit disk I/O
-contention on Windows. The default `addopts` do not enable
-parallelism: a bare `pytest` should behave the same everywhere.
+CI job; on a laptop it is a safe default. The default `addopts` do
+not enable parallelism: a bare `pytest` should behave the same
+everywhere.
 
 End-to-end tests are marked `slow`. They exercise a full phase
 transition and are the only place a lifecycle regression shows up;
@@ -77,54 +76,64 @@ coverage numbers.
   `tests/integration/`.
 - Docstring on every test, one line, saying what is checked.
 
-## Handoff and summary contracts
+## The contract
 
-Two documents carry intent across a phase boundary.
+`.harness/contract.md` is the harness's user-facing contract. It
+is shipped verbatim as the L1 bootstrap layer and is never
+truncated. It carries:
 
-- **`.harness/handoff.md`** — written by the AI at the start of a
-  phase. The file has two parts: the `harness:begin` ...
-  `harness:end` block, owned by the harness and rewritten on every
-  `close`, `new-phase`, and `apply`; and everything outside it,
-  owned by the AI. Never edit inside the block; the harness will
-  overwrite it. A handoff without the markers is repaired by
-  `ensure_metadata`, which inserts the block at the top. A handoff
-  with only one of the two markers, or with duplicate markers, is
-  also repaired: the stray marker lines are removed and a fresh
-  block is prepended.
-- **`.harness/summaries/{phase}.md`** — written by the AI at the
-  end of a phase via `dwch apply summary`. The harness refuses to
-  overwrite an existing summary; delete the file first if you need
-  to rewrite it. `dwch close` refuses to run without one.
+- the block grammar (FILE / DELETE / MOVE, path safety, limits);
+- the `plan.toml` schema (meta, interfaces, tasks);
+- the `task` schema (id, title, goal, files, interfaces,
+  acceptance, depends_on, removes, moves);
+- the `deviation` schema (three types only);
+- the `state.toml` schema (as seen by the AI);
+- the six behavioral rules;
+- the tool categories (Request / Produce / Suggest);
+- the command list;
+- the notes-vs-contract rule.
 
-`state.summary_phase` and `state.summary_written_at` record the
-most recent summary. The bootstrap renders it as
-`previous_summary`.
+If you change the shape of the plan, task, deviation, or state,
+update `contract.md` in the same commit. A regression test
+(`tests/integration/test_template_consistency.py`) extracts every
+field of `Task`, `Plan`, `Deviation`, and `State` from
+`domain.models` and asserts it appears in `contract.md`. A missing
+field is a failing test.
+
+`contract.md` is the only template shipped by `init`. Older
+templates (`session-protocol.md`, `step-format.md`,
+`report-format.md`, the two handoffs, `roadmap-format.md`,
+`deviation-format.md`, `toolbox.md`) were merged into it in 0.4.0
+and are gone.
 
 ## Phase transitions
 
-Every phase runs in its own chat. The handoff is the phase's
-intent; the summary is the phase's outcome. The next phase's
-bootstrap shows the most recent summary as `previous_summary`,
-which is the only cross-phase context the AI receives.
+Every phase runs in its own chat. The contract is the phase's
+intent; `state.toml` is the phase's state. There is no handoff and
+no summary: the plan and the state are the whole cross-phase
+record, and both are committed together with the code.
 
 Two invariants guard the transition:
 
-- `new-phase` refuses to run while the previous phase is open,
-  where "open" means `state.last_closed` is unset or is older than
-  `state.last_opened`. The predicate is
-  `rules.is_phase_closed`.
-- `close` refuses to run twice on the same phase, and refuses to
-  run without a summary file on disk.
+- `start` refuses to run while the previous phase is open. A phase
+  is open when `state.phase_status == "open"`; it becomes closed
+  when `done` finalizes the last task, or `abandon` marks it
+  abandoned.
+- `done` requires `state.verify.ok` for the current task. A
+  re-`apply` resets the flag: a task that has been re-applied is
+  not verified in its new form.
 
 Both invariants are checked in a fixed order so a malformed state
 cannot be papered over by skipping a step.
 
-## Step numbers
+## Task ids
 
-A step number is a positive integer. `1`, `01`, and `001` name the
-same step. Every command that builds a step filename goes through
-`format.format_step`, so `apply 1` and `verify 01` agree on
-`step-01.txt`. Deviations use the same two-digit form.
+A task id is a slug: `^[a-z][a-z0-9-]*$`, unique within a plan,
+≤40 chars. The id becomes a directory name under
+`steps/{phase}/{task_id}/`, so the regex is stricter than the
+filesystem would require on POSIX. Do not relax it: a task id that
+contains a separator or a Windows-reserved name would corrupt the
+steps tree.
 
 ## Architecture invariants
 
@@ -138,8 +147,8 @@ Do not break these without discussion:
 - `cli` imports everything.
 - Ports are `Protocol`. Adapters satisfy them structurally.
 - No Pydantic. Dataclasses for domain models.
-- `apply` and `close` are atomic: validate everything before any
-  write; rollback on partial failure.
+- `apply` is atomic: validate everything before any write; roll
+  back on partial failure.
 - `save_state` is atomic: write temp, then rename.
 - Lifecycle timestamps go through `state.now_iso`, which applies
   `state.TIMESTAMP_TIMESPEC`. Do not call `datetime.now` directly

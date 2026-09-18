@@ -23,42 +23,38 @@ def test_default_config_loads(tmp_path: Path) -> None:
     _write(tmp_path, config_to_toml("p"))
     cfg = load_config(LocalFilesystem(), tmp_path)
     assert cfg.project_name == "p"
-    assert cfg.harness_version == "0.3.0"
+    assert cfg.harness_version == "0.4.0"
     assert cfg.paths["steps"] == "steps"
-    assert cfg.roadmap["path"] == ".harness/roadmap.toml"
+    assert cfg.plan["path"] == ".harness/plan.toml"
+    assert cfg.notes_path == ".harness/notes.md"
 
 
-def test_config_format_version_is_0_3_0(tmp_path: Path) -> None:
-    """The rendered config carries the 0.3.0 format version."""
+def test_config_format_version_is_0_4_0(tmp_path: Path) -> None:
+    """The rendered config carries the 0.4.0 format version."""
     _write(tmp_path, config_to_toml("p"))
     cfg = load_config(LocalFilesystem(), tmp_path)
-    assert cfg.harness_version == "0.3.0"
+    assert cfg.harness_version == "0.4.0"
 
 
-def test_default_config_has_no_phases_key(tmp_path: Path) -> None:
-    """`paths.phases` is gone: it was never read by any code."""
+def test_default_config_has_no_roadmap_section(tmp_path: Path) -> None:
+    """`[roadmap]` is gone; `[plan]` replaces it."""
+    body = config_to_toml("p")
+    assert "[roadmap]" not in body
+    assert "[plan]" in body
+
+
+def test_default_config_has_notes(tmp_path: Path) -> None:
+    """`[context].notes` is present with the documented default."""
     _write(tmp_path, config_to_toml("p"))
     cfg = load_config(LocalFilesystem(), tmp_path)
-    assert "phases" not in cfg.paths
-    assert "phases" not in config_to_toml("p")
+    assert cfg.context["notes"] == ".harness/notes.md"
 
 
-def test_bootstrap_reports_current_phase_default(tmp_path: Path) -> None:
-    """The default config has `reports_current_phase = 1`."""
+def test_bootstrap_max_tokens_is_5000(tmp_path: Path) -> None:
+    """The default `max_tokens` dropped to 5000."""
     _write(tmp_path, config_to_toml("p"))
     cfg = load_config(LocalFilesystem(), tmp_path)
-    assert cfg.bootstrap["reports_current_phase"] == 1
-
-
-def test_bootstrap_reports_current_phase_override(tmp_path: Path) -> None:
-    """An explicit `reports_current_phase` value is honored."""
-    body = config_to_toml("p").replace(
-        "reports_current_phase = 1",
-        "reports_current_phase = 5",
-    )
-    _write(tmp_path, body)
-    cfg = load_config(LocalFilesystem(), tmp_path)
-    assert cfg.bootstrap["reports_current_phase"] == 5
+    assert cfg.bootstrap["max_tokens"] == 5000
 
 
 def test_missing_config(tmp_path: Path) -> None:
@@ -76,7 +72,7 @@ def test_invalid_toml(tmp_path: Path) -> None:
 
 def test_version_mismatch(tmp_path: Path) -> None:
     """A config with a different format version is rejected."""
-    body = config_to_toml("p").replace('version = "0.3.0"', 'version = "9.9.9"')
+    body = config_to_toml("p").replace('version = "0.4.0"', 'version = "9.9.9"')
     _write(tmp_path, body)
     with pytest.raises(ConfigError, match="does not match"):
         load_config(LocalFilesystem(), tmp_path)
@@ -106,6 +102,26 @@ def test_path_has_parent_traversal(tmp_path: Path) -> None:
         load_config(LocalFilesystem(), tmp_path)
 
 
+def test_notes_path_is_validated(tmp_path: Path) -> None:
+    """An absolute `context.notes` is rejected."""
+    body = config_to_toml("p").replace(
+        'notes = ".harness/notes.md"', 'notes = "/abs/notes.md"'
+    )
+    _write(tmp_path, body)
+    with pytest.raises(ConfigError, match="context.notes"):
+        load_config(LocalFilesystem(), tmp_path)
+
+
+def test_plan_path_is_validated(tmp_path: Path) -> None:
+    """An absolute `plan.path` is rejected."""
+    body = config_to_toml("p").replace(
+        'path = ".harness/plan.toml"', 'path = "/abs/plan.toml"'
+    )
+    _write(tmp_path, body)
+    with pytest.raises(ConfigError, match="plan.path"):
+        load_config(LocalFilesystem(), tmp_path)
+
+
 def test_command_must_be_a_list(tmp_path: Path) -> None:
     """A string command is rejected at load time."""
     body = config_to_toml("p").replace(
@@ -126,16 +142,3 @@ def test_planning_command_must_be_a_list(tmp_path: Path) -> None:
     _write(tmp_path, body)
     with pytest.raises(ConfigError, match="expected a list"):
         load_config(LocalFilesystem(), tmp_path)
-
-
-def test_legacy_config_with_phases_key_loads(tmp_path: Path) -> None:
-    """A config that still has `paths.phases` from 0.3.0 keeps working."""
-    body = config_to_toml("p").replace(
-        '[paths]\nsteps = "steps"',
-        '[paths]\nsteps = "steps"\nphases = "phases"',
-    )
-    _write(tmp_path, body)
-    cfg = load_config(LocalFilesystem(), tmp_path)
-    # The key survives in `paths` because the loader merges user
-    # keys, but nothing in the harness reads it.
-    assert cfg.paths["steps"] == "steps"

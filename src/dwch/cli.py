@@ -27,10 +27,6 @@ def main(argv: list[str] | None = None) -> int:
     """Parse argv and run the requested command. Returns an exit code."""
     project_root = Path.cwd()
 
-    # Refuse to operate at a filesystem root, in a system directory,
-    # in the home directory, or on a UNC/device path. The check runs
-    # before parsing: a bad root is reported before anything else,
-    # including `--help`.
     refusal = check_safe_root(project_root)
     if refusal is not None:
         print(f"error: {refusal}", file=sys.stderr)
@@ -39,17 +35,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    # Adapters are constructed once; the tokenizer path is passed
-    # to `init` even before the harness is initialized, because the
-    # counter is not used during init.
     fs = LocalFilesystem()
     process = SubprocessRunner()
     git = CliGit(process)
     clipboard = pick_clipboard()
 
-    # Try to read the config for the tokenizer path. Before `init`,
-    # the config does not exist; the counter is then loaded with a
-    # default path, which will fail loudly only when actually used.
     try:
         config = load_config(fs, project_root)
         counter = DeepseekTokenizer(config.tokenizer_path)
@@ -96,26 +86,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing .harness/ directory.",
     )
 
-    sub.add_parser("health", help="Check environment and project state.")
-
-    p_boot = sub.add_parser("bootstrap", help="Build the opening message.")
-    p_boot.add_argument(
-        "--clipboard",
-        action="store_true",
-        help="Copy the message to the clipboard instead of printing.",
-    )
-
-    p_apply = sub.add_parser(
-        "apply",
+    p_start = sub.add_parser("start", help="Begin a phase.")
+    p_start.add_argument("goal", help="Short goal; becomes the phase name.")
+    p_start.add_argument(
+        "--kind",
+        choices=["planning", "development"],
+        default=None,
         help=(
-            "Parse and write a step, or `apply summary` to write "
-            "the current phase's summary."
+            "Kind of phase. Default: infer from state "
+            "(frozen plan → development, otherwise planning)."
         ),
     )
-    p_apply.add_argument(
-        "step",
-        help="Two-digit step number, or `summary` to write the phase summary.",
+
+    sub.add_parser(
+        "next",
+        help="Assemble the current task's bootstrap and copy it to the clipboard.",
     )
+
+    p_apply = sub.add_parser("apply", help="Parse and write the current task's files.")
     p_apply.add_argument(
         "--from-file",
         default=None,
@@ -125,62 +113,47 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    p_verify = sub.add_parser("verify", help="Run checks and produce a report.")
-    p_verify.add_argument("step", help="Two-digit step number.")
+    p_verify = sub.add_parser(
+        "verify",
+        help="Run checks for the current task and produce the report.",
+    )
     p_verify.add_argument(
         "--clipboard",
         action="store_true",
-        help="Copy the report to the clipboard.",
+        help="Copy the report to the clipboard on success.",
     )
 
-    p_close = sub.add_parser("close", help="Finalize the session.")
-    p_close.add_argument(
-        "--tag",
-        action="store_true",
-        help="Create a git tag for this session.",
-    )
-    p_close.add_argument(
-        "--freeze",
-        action="store_true",
-        help=(
-            "Freeze the roadmap: compute hashes of roadmap.toml and "
-            "architecture documents, write .harness/roadmap.lock, and "
-            "mark state as frozen. Valid only in a planning phase."
-        ),
-    )
+    sub.add_parser("done", help="Close the current task and commit.")
+    sub.add_parser("fix", help="Assemble a fix-bootstrap for the last failure.")
 
-    p_read = sub.add_parser("read", help="Wrap a file in step markers.")
+    p_abandon = sub.add_parser("abandon", help="Mark the current phase abandoned.")
+    p_abandon.add_argument("--yes", action="store_true", help="Confirm.")
+
+    sub.add_parser("status", help="Print the current state.")
+
+    p_log = sub.add_parser("log", help="Recent lifecycle events.")
+    p_log.add_argument("n", nargs="?", type=int, default=10, help="How many commits.")
+
+    sub.add_parser("health", help="Check environment and project state.")
+
+    p_read = sub.add_parser("read", help="Wrap a file in block markers.")
     p_read.add_argument("path", help="File, glob, or directory.")
-    p_read.add_argument(
-        "--clipboard",
-        action="store_true",
-        help="Copy the output to the clipboard.",
-    )
+    p_read.add_argument("--clipboard", action="store_true")
 
     p_map = sub.add_parser("map", help="Print the module interface map.")
     p_map.add_argument("--root", default=None, help="Root of the map.")
     p_map.add_argument("--full", action="store_true", help="Include docstrings.")
-    p_map.add_argument("--tree", action="store_true", help="Also print a tree.")
     p_map.add_argument("--private", action="store_true", help="Include _names.")
     p_map.add_argument("--clipboard", action="store_true")
 
-    p_rb = sub.add_parser("rollback", help="Undo the last step.")
-    p_rb.add_argument("--yes", action="store_true", help="Confirm.")
-
-    p_np = sub.add_parser("new-phase", help="Start a new phase.")
-    p_np.add_argument("name", help="Phase name (no spaces).")
-    p_np.add_argument(
-        "--kind",
-        choices=["planning", "development"],
-        default="development",
-        help=(
-            "Kind of phase. Planning sessions produce a roadmap; "
-            "development sessions execute a frozen one."
-        ),
-    )
+    p_tree = sub.add_parser("tree", help="Print a directory tree.")
+    p_tree.add_argument("root", nargs="?", default=None, help="Root of the tree.")
 
     p_count = sub.add_parser("count", help="Count tokens.")
     p_count.add_argument("path", help="File or directory.")
+
+    p_rb = sub.add_parser("rollback", help="Undo the last task commit.")
+    p_rb.add_argument("--yes", action="store_true", help="Confirm.")
 
     return parser
 

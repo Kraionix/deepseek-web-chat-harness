@@ -4,6 +4,9 @@ State is written by the harness. Save operations are atomic: the
 new content is written to a temp file and then renamed over the
 original, so a crash mid-write leaves the file either fully old or
 fully new, never partially written.
+
+All `set_*` helpers are pure: they return a new `State` and do not
+touch disk. The caller decides when to persist.
 """
 
 from __future__ import annotations
@@ -15,27 +18,14 @@ from pathlib import Path
 
 from ..domain.models import State
 from ..shared.errors import StateError
+from ..shared.toml import escape_basic_string
 from .ports import FilesystemPort
 
-# Version of the state file format. Independent of the package
-# version: a patch release that does not change the format keeps
-# this value, and existing `.harness/state.toml` files keep working.
-#
-# 0.3.0 adds a `[summary]` section and rejects any file whose
-# `[harness].version` does not match. Backward compatibility is not
-# preserved.
-_STATE_FORMAT_VERSION = "0.3.0"
+_STATE_FORMAT_VERSION = "0.4.0"
 
 # Invariant: every timestamp the harness records uses microsecond
-# precision. `is_phase_closed` compares `last_closed` and
-# `last_opened` as strings, so two lifecycle events landing in the
-# same wall-clock second must still be distinguishable. Second
-# resolution is not enough: `close` followed immediately by
-# `new-phase` collides.
-#
-# Public so that every command calls `now_iso()` rather than
-# re-importing the constant. Drift between commands is the class of
-# bug the constant exists to prevent.
+# precision. A rapid close-then-start pair must remain
+# distinguishable.
 TIMESTAMP_TIMESPEC = "microseconds"
 
 
@@ -77,27 +67,33 @@ def load_state(fs: FilesystemPort, project_root: Path) -> State:
         )
 
     phase = data.get("phase", {})
-    step = data.get("step", {})
-    roadmap = data.get("roadmap", {})
+    plan = data.get("plan", {})
+    verify = data.get("verify", {})
+    failure = data.get("failure", {})
     rollback = data.get("rollback", {})
     session = data.get("session", {})
-    summary = data.get("summary", {})
 
     return State(
         harness_version=version,
-        current_phase=str(phase.get("current", "unset")),
+        phase_name=str(phase.get("name", "unset")),
         phase_kind=str(phase.get("kind", "unset")),
-        current_step=int(step.get("current", 0)),
-        last_commit=str(step.get("last_commit", "")),
-        last_commit_date=str(step.get("last_commit_date", "")),
-        roadmap_version=int(roadmap.get("version", 0)),
-        roadmap_step=int(roadmap.get("step", 0)),
-        roadmap_frozen=bool(roadmap.get("frozen", False)),
+        phase_status=str(phase.get("status", "closed")),
+        phase_opened_at=str(phase.get("opened_at", "")),
+        phase_closed_at=str(phase.get("closed_at", "")),
+        plan_version=int(plan.get("version", 0)),
+        plan_sha256=str(plan.get("sha256", "")),
+        plan_position=int(plan.get("position", 0)),
+        plan_frozen=bool(plan.get("frozen", False)),
+        verify_ok=bool(verify.get("ok", False)),
+        verify_task_id=str(verify.get("task_id", "")),
+        verify_at=str(verify.get("at", "")),
+        failure_task_id=str(failure.get("task_id", "")),
+        failure_check_name=str(failure.get("check_name", "")),
+        failure_excerpt=str(failure.get("excerpt", "")),
+        failure_count=int(failure.get("count", 0)),
         rollback_count=int(rollback.get("count", 0)),
-        last_opened=str(session.get("last_opened", "")),
-        last_closed=str(session.get("last_closed", "")),
-        summary_phase=str(summary.get("phase", "")),
-        summary_written_at=str(summary.get("written_at", "")),
+        last_commit=str(session.get("last_commit", "")),
+        last_commit_date=str(session.get("last_commit_date", "")),
     )
 
 
@@ -105,15 +101,9 @@ def save_state(fs: FilesystemPort, project_root: Path, state: State) -> None:
     """Write `.harness/state.toml` atomically.
 
     The file is written to `state.toml.tmp` and then renamed over
-    the destination. Both operations go through the filesystem port
-    so that alternate implementations (in-memory for tests) behave
-    the same way.
-
-    The rename is atomic: a concurrent reader sees either the old
-    state or the new state, never a truncated file. A crash between
-    `write_text` and `rename` leaves the destination untouched and
-    a stray `.tmp` file behind, which is harmless and overwritten on
-    the next save.
+    the destination. A crash between `write_text` and `rename`
+    leaves the destination untouched and a stray `.tmp` file behind,
+    which is harmless and overwritten on the next save.
     """
     path = _state_path(project_root)
     tmp = path.with_suffix(".toml.tmp")
@@ -122,45 +112,148 @@ def save_state(fs: FilesystemPort, project_root: Path, state: State) -> None:
 
 
 def initial_state() -> State:
-    """Return a fresh `State` for a newly-initialized project."""
+    """Return a fresh `State` for a newly-initialized project.
+
+    Phase is `unset` (kind) with status `closed`: no work is active
+    until `start` opens one.
+    """
     return State(
         harness_version=_STATE_FORMAT_VERSION,
-        current_phase="unset",
+        phase_name="unset",
         phase_kind="unset",
-        current_step=0,
+        phase_status="closed",
+        phase_opened_at=now_iso(),
+        phase_closed_at="",
+        plan_version=0,
+        plan_sha256="",
+        plan_position=0,
+        plan_frozen=False,
+        verify_ok=False,
+        verify_task_id="",
+        verify_at="",
+        failure_task_id="",
+        failure_check_name="",
+        failure_excerpt="",
+        failure_count=0,
+        rollback_count=0,
         last_commit="",
         last_commit_date="",
-        roadmap_version=0,
-        roadmap_step=0,
-        roadmap_frozen=False,
-        rollback_count=0,
-        last_opened=now_iso(),
-        last_closed="",
-        summary_phase="",
-        summary_written_at="",
     )
 
 
-def set_roadmap_frozen(
-    fs: FilesystemPort,
-    project_root: Path,
-    state: State,
-    *,
-    version: int,
-) -> State:
-    """Return `state` marked frozen for roadmap `version` and persisted.
+def set_phase_open(state: State, name: str, kind: str, at: str) -> State:
+    """Return `state` with a fresh phase opened.
 
-    `roadmap_step` is reset to zero: a new roadmap version has its
-    own step numbering, starting from 1.
+    Resets `phase_closed_at`. Does not touch the plan fields: the
+    caller decides whether to reset the plan position.
     """
-    updated = replace(
+    return replace(
         state,
-        roadmap_frozen=True,
-        roadmap_version=version,
-        roadmap_step=0,
+        phase_name=name,
+        phase_kind=kind,
+        phase_status="open",
+        phase_opened_at=at,
+        phase_closed_at="",
     )
-    save_state(fs, project_root, updated)
-    return updated
+
+
+def set_phase_closed(state: State, at: str) -> State:
+    """Return `state` with the phase closed normally."""
+    return replace(state, phase_status="closed", phase_closed_at=at)
+
+
+def set_phase_abandoned(state: State, at: str) -> State:
+    """Return `state` with the phase abandoned.
+
+    Files stay on disk including a frozen plan. The next phase does
+    not inherit anything from an abandoned one.
+    """
+    return replace(state, phase_status="abandoned", phase_closed_at=at)
+
+
+def set_verify_ok(state: State, task_id: str, at: str) -> State:
+    """Return `state` with a successful verify recorded.
+
+    Clears failure fields: a success resets the consecutive-failure
+    counter for the task.
+    """
+    return replace(
+        state,
+        verify_ok=True,
+        verify_task_id=task_id,
+        verify_at=at,
+        failure_task_id="",
+        failure_check_name="",
+        failure_excerpt="",
+        failure_count=0,
+    )
+
+
+def set_verify_fail(
+    state: State,
+    task_id: str,
+    check_name: str,
+    excerpt: str,
+    at: str,
+) -> State:
+    """Return `state` with a failed verify recorded.
+
+    The consecutive-failure counter increments when the failed task
+    is the same as the previous failure's task; otherwise it resets
+    to 1. The counter is what drives the fix-loop warning.
+    """
+    count = state.failure_count + 1 if state.failure_task_id == task_id else 1
+    return replace(
+        state,
+        verify_ok=False,
+        verify_task_id=task_id,
+        verify_at=at,
+        failure_task_id=task_id,
+        failure_check_name=check_name,
+        failure_excerpt=excerpt,
+        failure_count=count,
+    )
+
+
+def reset_failure(state: State) -> State:
+    """Return `state` with failure fields cleared."""
+    return replace(
+        state,
+        failure_task_id="",
+        failure_check_name="",
+        failure_excerpt="",
+        failure_count=0,
+    )
+
+
+def set_plan_frozen(state: State, version: int, sha256: str) -> State:
+    """Return `state` with the plan frozen at `version`/`sha256`.
+
+    Resets `plan_position` to zero: a frozen plan is a new contract
+    with its own task ordering.
+    """
+    return replace(
+        state,
+        plan_version=version,
+        plan_sha256=sha256,
+        plan_frozen=True,
+        plan_position=0,
+    )
+
+
+def advance_position(state: State) -> State:
+    """Return `state` with `plan_position` incremented by one."""
+    return replace(state, plan_position=state.plan_position + 1)
+
+
+def reset_position(state: State) -> State:
+    """Return `state` with `plan_position` reset to zero."""
+    return replace(state, plan_position=0)
+
+
+def increment_rollback(state: State) -> State:
+    """Return `state` with `rollback_count` incremented by one."""
+    return replace(state, rollback_count=state.rollback_count + 1)
 
 
 def with_updates(state: State, **kwargs) -> State:
@@ -179,39 +272,47 @@ def _state_path(project_root: Path) -> Path:
 def _render_state(state: State) -> str:
     """Render `State` as a TOML document.
 
-    Hand-written: stdlib has no TOML writer. The format is
-    deliberately flat — no nested tables — so a small renderer is
-    sufficient.
+    Hand-written: stdlib has no TOML writer. Every string value is
+    escaped uniformly; the harness's own values never need it, but
+    a `failure.excerpt` can contain anything, and the cost of
+    uniform escaping is nil.
     """
-    frozen = "true" if state.roadmap_frozen else "false"
+    frozen = "true" if state.plan_frozen else "false"
+    verify_ok = "true" if state.verify_ok else "false"
     lines = [
         "[harness]",
-        f'version = "{state.harness_version}"',
+        f'version = "{escape_basic_string(state.harness_version)}"',
         "",
         "[phase]",
-        f'current = "{state.current_phase}"',
-        f'kind = "{state.phase_kind}"',
+        f'name = "{escape_basic_string(state.phase_name)}"',
+        f'kind = "{escape_basic_string(state.phase_kind)}"',
+        f'status = "{escape_basic_string(state.phase_status)}"',
+        f'opened_at = "{escape_basic_string(state.phase_opened_at)}"',
+        f'closed_at = "{escape_basic_string(state.phase_closed_at)}"',
         "",
-        "[step]",
-        f"current = {state.current_step}",
-        f'last_commit = "{state.last_commit}"',
-        f'last_commit_date = "{state.last_commit_date}"',
-        "",
-        "[roadmap]",
-        f"version = {state.roadmap_version}",
-        f"step = {state.roadmap_step}",
+        "[plan]",
+        f"version = {state.plan_version}",
+        f'sha256 = "{escape_basic_string(state.plan_sha256)}"',
+        f"position = {state.plan_position}",
         f"frozen = {frozen}",
+        "",
+        "[verify]",
+        f"ok = {verify_ok}",
+        f'task_id = "{escape_basic_string(state.verify_task_id)}"',
+        f'at = "{escape_basic_string(state.verify_at)}"',
+        "",
+        "[failure]",
+        f'task_id = "{escape_basic_string(state.failure_task_id)}"',
+        f'check_name = "{escape_basic_string(state.failure_check_name)}"',
+        f'excerpt = "{escape_basic_string(state.failure_excerpt)}"',
+        f"count = {state.failure_count}",
         "",
         "[rollback]",
         f"count = {state.rollback_count}",
         "",
         "[session]",
-        f'last_opened = "{state.last_opened}"',
-        f'last_closed = "{state.last_closed}"',
-        "",
-        "[summary]",
-        f'phase = "{state.summary_phase}"',
-        f'written_at = "{state.summary_written_at}"',
+        f'last_commit = "{escape_basic_string(state.last_commit)}"',
+        f'last_commit_date = "{escape_basic_string(state.last_commit_date)}"',
         "",
     ]
     return "\n".join(lines)
@@ -219,10 +320,19 @@ def _render_state(state: State) -> str:
 
 __all__ = [
     "TIMESTAMP_TIMESPEC",
+    "advance_position",
+    "increment_rollback",
     "initial_state",
     "load_state",
     "now_iso",
+    "reset_failure",
+    "reset_position",
     "save_state",
-    "set_roadmap_frozen",
+    "set_phase_abandoned",
+    "set_phase_closed",
+    "set_phase_open",
+    "set_plan_frozen",
+    "set_verify_fail",
+    "set_verify_ok",
     "with_updates",
 ]

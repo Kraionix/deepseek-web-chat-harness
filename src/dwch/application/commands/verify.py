@@ -1,86 +1,52 @@
-"""`dwch verify NN` — run checks, commit, produce the report.
+"""`dwch verify` — run checks, produce the report, hint on failure.
 
-The report is written to `steps/{phase}/report-NN.txt` and
-optionally copied to the clipboard. It is the only channel through
-which the AI learns what happened, so it is deliberately complete:
-every check's full stdout and stderr, the commit hash on success,
-and any deviations recorded against the roadmap.
+Checks are derived from the current task's spec. On success,
+`state.verify.ok` becomes True and the report is written. On
+failure, `state.failure` is updated, the failure count for the
+current task is incremented, and a short hint is placed on the
+clipboard.
 
-On any required check failing, the commit is skipped but the report
-is still written. The AI needs to see the failure to fix it.
-
-On success, `verify` updates `state.toml` (current_step,
-roadmap_step, last_commit_date) before committing, so the state
-file is included in the same commit as the step's files. If the
-commit itself fails, state is restored and only the report is left
-behind — a failed verify must not leave the tree in a state that
-looks verified.
-
-Auto-deviations are computed in memory on every run, so the report
-always shows them, but they are written to disk only when the run
-succeeds. A failed run must not leave the tree dirty. A step that
-declares a blocker suppresses auto-deviations: the missing files
-are intentional, and an extra `missing-file` entry would only add
-noise.
+`verify` never commits. Committing is `done`'s job, and only after
+`verify` says the tree is in a good state.
 """
 
 from __future__ import annotations
 
-import contextlib
 import sys
 from argparse import Namespace
-from pathlib import Path, PurePosixPath
 
-from ...domain.models import (
-    CheckResult,
-    Deviation,
-    Report,
-    Roadmap,
-    StepOp,
-    op_written_paths,
-)
-from ...domain.rules import (
-    has_blocker,
-    is_development_phase,
-    is_planning_phase,
-    is_roadmap_frozen,
-    is_substantive,
-    is_unset_phase,
-)
+from ...domain.models import CheckResult, Report
+from ...domain.rules import is_planning_phase, is_unset_phase
 from ...shared.errors import FormatError, HarnessError
-from .. import deviations as dev_mod
-from .. import lock as lock_mod
-from .. import roadmap as roadmap_mod
+from ...shared.paths import normalize_rel
+from .. import plan as plan_mod
 from ..config import load_config
 from ..deps import Deps
 from ..format import (
-    format_step,
-    parse_step_arg,
     parse_step_message,
+    render_hint,
     render_report,
     summarize_check,
     validate_paths,
 )
-from ..state import load_state, now_iso, save_state, with_updates
+from ..state import (
+    load_state,
+    now_iso,
+    save_state,
+    set_verify_fail,
+    set_verify_ok,
+)
 from ..verify_checks import (
-    check_architecture_lock,
     check_compile,
-    check_roadmap_changes,
-    check_roadmap_interfaces,
-    check_roadmap_step,
-    compute_auto_deviations,
+    check_plan_structure,
+    check_task_changes,
+    check_task_interfaces,
     run_configured,
 )
 
 
 def cmd_verify(args: Namespace, deps: Deps) -> int:
-    """Verify a step. Returns 0 on success, 1 on check failure, 2 on error."""
-    try:
-        step_num = parse_step_arg(args.step)
-    except FormatError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
+    """Verify the current task. Returns 0, 1, or 2."""
     try:
         config = load_config(deps.fs, deps.project_root)
         state = load_state(deps.fs, deps.project_root)
@@ -89,336 +55,177 @@ def cmd_verify(args: Namespace, deps: Deps) -> int:
         return 2
 
     if is_unset_phase(state):
+        print('error: no active phase; run `dwch start "goal"` first', file=sys.stderr)
+        return 2
+
+    task_id, task_or_none = _current_task(state, deps, config)
+    if task_id is None:
         print(
-            "error: no active phase; run "
-            "`dwch new-phase NAME --kind {planning|development}` first",
+            "error: no current task; the plan is missing or exhausted",
             file=sys.stderr,
         )
         return 2
 
-    tag = format_step(step_num)
     steps_dir = (
-        deps.project_root / config.paths.get("steps", "steps") / state.current_phase
+        deps.project_root
+        / config.paths.get("steps", "steps")
+        / state.phase_name
+        / task_id
     )
-    step_file = steps_dir / f"step-{tag}.txt"
-    apply_log_path = steps_dir / f"apply-{tag}.log"
-
-    if not deps.fs.exists(step_file):
-        print(f"error: {step_file} not found; run `apply` first", file=sys.stderr)
-        return 2
-
-    step_text = deps.fs.read_text(step_file)
-    ops = _parse_step_or_none(step_text)
-    if ops is None:
+    message_path = steps_dir / "message.txt"
+    if not deps.fs.exists(message_path):
         print(
-            f"error: {step_file.name} contains no valid blocks. "
-            "The preceding `apply` failed to parse it. "
-            "Re-run `apply` with a valid message before verifying.",
+            f"error: {message_path} not found; run `dwch apply` first",
             file=sys.stderr,
         )
         return 2
 
-    # The step file may have been edited by hand after `apply`. Its
-    # paths were validated when it was written, but not since. Run
-    # the same validation here before any path is used.
     try:
+        ops = parse_step_message(deps.fs.read_text(message_path))
         validate_paths(ops, deps.project_root)
     except FormatError as exc:
         print(
-            f"error: {step_file.name} contains an unsafe path: {exc}",
+            f"error: {message_path.name} contains no valid blocks: {exc}",
             file=sys.stderr,
         )
         return 2
 
-    missing: list[str] = []
-    for op in ops:
-        for path in op_written_paths(op):
-            if not deps.fs.is_file(deps.project_root / path):
-                missing.append(path)
-    if missing:
-        print(
-            "error: step references files that do not exist on disk: "
-            + ", ".join(missing)
-            + ". Run `apply` again.",
-            file=sys.stderr,
-        )
-        return 2
+    apply_log = ""
+    log_path = steps_dir / "apply.log"
+    if deps.fs.exists(log_path):
+        apply_log = deps.fs.read_text(log_path).rstrip()
 
-    apply_log = (
-        deps.fs.read_text(apply_log_path).rstrip()
-        if deps.fs.exists(apply_log_path)
-        else ""
-    )
+    checks: list[CheckResult] = [check_compile(ops, deps)]
 
-    roadmap_path = deps.project_root / config.roadmap.get(
-        "path", ".harness/roadmap.toml"
-    )
-    roadmap = _load_roadmap_or_none(deps, roadmap_path)
-
-    is_planning = is_planning_phase(state)
-    is_development = is_development_phase(state)
-    dev_dir = deps.project_root / config.roadmap.get(
-        "deviations_path", ".harness/deviations"
-    )
-
-    checks: list[CheckResult] = []
-
-    if is_planning:
-        checks.extend(_planning_checks(ops, deps, config, roadmap))
-    elif is_development:
-        checks.extend(_development_checks(step_num, deps, config, state, roadmap, ops))
+    plan_path = deps.project_root / config.plan["path"]
+    if is_planning_phase(state):
+        checks.extend(_planning_checks(ops, deps, config, plan_path))
+        checks.extend(run_configured(list(config.planning_commands), deps))
     else:
-        print(
-            "error: no phase is active. Run `dwch new-phase NAME --kind ...` first.",
-            file=sys.stderr,
-        )
-        return 2
-
-    # A development phase that says it is frozen must actually be
-    # frozen. A missing roadmap file is a real problem: the roadmap
-    # checks would be silently skipped. Report it as a required
-    # check so the report explains the situation.
-    if is_development and is_roadmap_frozen(state) and roadmap is None:
-        checks.append(
-            CheckResult(
-                name="roadmap-missing",
-                command=("roadmap-missing",),
-                exit_code=1,
-                stdout=(
-                    f"state says frozen, but "
-                    f"{roadmap_path.relative_to(deps.project_root)} "
-                    "was not found or could not be parsed"
-                ),
-                stderr="",
-                required=True,
+        plan = None
+        if deps.fs.exists(plan_path):
+            try:
+                plan = plan_mod.load(deps.fs, plan_path)
+            except HarnessError as exc:
+                print(f"warning: could not load plan: {exc}", file=sys.stderr)
+        if plan is not None and task_or_none is not None:
+            checks.append(check_task_changes(ops, task_or_none))
+            checks.append(
+                check_task_interfaces(
+                    deps.fs, deps.project_root, ops, task_or_none, plan
+                )
             )
-        )
+        checks.extend(run_configured(list(config.verify_commands), deps))
 
     for check in checks:
         print(summarize_check(check))
 
-    all_required_ok = all(c.exit_code == 0 for c in checks if c.required)
+    all_ok = all(c.exit_code == 0 for c in checks if c.required)
 
-    # Declared deviations are read before auto-detection: a blocker
-    # is a deliberate "I cannot do this", and auto-flagging the
-    # missing files on top of it would only add noise.
-    declared = dev_mod.load_step(deps.fs, dev_dir, step_num)
+    attempt = state.failure_count + 1 if state.failure_task_id == task_id else 1
 
-    auto_devs: list[Deviation] = []
-    if (
-        is_development
-        and is_roadmap_frozen(state)
-        and roadmap is not None
-        and not has_blocker(declared)
-    ):
-        current = roadmap_mod.find_step(roadmap, state.roadmap_step + 1)
-        if current is not None:
-            auto_devs = compute_auto_deviations(ops, current)
+    if all_ok:
+        fresh = set_verify_ok(state, task_id, now_iso())
+        save_state(deps.fs, deps.project_root, fresh)
+    else:
+        first_fail = next((c for c in checks if c.exit_code != 0 and c.required), None)
+        check_name = first_fail.name if first_fail else "unknown"
+        excerpt = ""
+        if first_fail is not None:
+            text = (first_fail.stdout or "") + (first_fail.stderr or "")
+            excerpt = text.strip()[:500]
+        fresh = set_verify_fail(state, task_id, check_name, excerpt, now_iso())
+        save_state(deps.fs, deps.project_root, fresh)
 
-    before_step = state.roadmap_step
-    after_step = before_step
-    commit_hash: str | None = None
-    commit_message: str | None = None
-
-    if all_required_ok:
-        commit_message = f"step {tag}: applied and verified"
-        if auto_devs:
-            dev_mod.write_auto(deps.fs, dev_dir, step_num, auto_devs)
-        advance_roadmap = (
-            is_development
-            and is_roadmap_frozen(state)
-            and roadmap is not None
-            and is_substantive(ops)
-        )
-        updated = with_updates(
-            state,
-            current_step=step_num,
-            last_commit_date=now_iso(),
-            roadmap_step=state.roadmap_step + (1 if advance_roadmap else 0),
-        )
-        save_state(deps.fs, deps.project_root, updated)
-        if advance_roadmap:
-            after_step = before_step + 1
-        try:
-            commit_hash = deps.git.commit_all(deps.project_root, commit_message)
-        except HarnessError as exc:
-            # Commit failed: the tree is dirty, state already moved,
-            # and auto-deviations were written. Undo state and the
-            # auto-deviation file, then stop with a non-zero code.
-            # The report is still produced below so the user can see
-            # the checks that ran.
-            save_state(deps.fs, deps.project_root, state)
-            if auto_devs:
-                auto_path = dev_dir / f"step-{step_num:02d}-auto.toml"
-                with contextlib.suppress(HarnessError):
-                    deps.fs.unlink(auto_path)
-            after_step = before_step
-            commit_message = None
-            print(f"error: commit failed: {exc}", file=sys.stderr)
-            print("state was restored; tree is dirty", file=sys.stderr)
-            all_required_ok = False
-
-    if commit_hash:
-        print(f"commit: {commit_hash}")
-    elif not all_required_ok:
-        print("commit: skipped")
-
-    all_devs = tuple(declared) + tuple(auto_devs)
     report = Report(
-        step_number=step_num,
+        task_id=task_id,
+        attempt=attempt,
         apply_log=apply_log,
         checks=tuple(checks),
-        commit_hash=commit_hash,
-        commit_message=commit_message,
-        deviations=all_devs,
-        roadmap_position=(before_step, after_step) if is_development else None,
+        commit_hash=None,
+        commit_message=None,
+        deviations=(),
+        plan_position=None,
         notes="",
         question="",
     )
     rendered = render_report(report)
-    report_path = steps_dir / f"report-{tag}.txt"
+    report_path = steps_dir / f"report-{attempt}.txt"
     deps.fs.write_text(report_path, rendered)
     print(f"report: {report_path}")
 
-    if args.clipboard:
+    if not all_ok:
+        hint = render_hint(report)
+        if deps.clipboard.write(hint):
+            print("hint copied to clipboard", file=sys.stderr)
+        else:
+            print("warning: clipboard unavailable", file=sys.stderr)
+    elif getattr(args, "clipboard", False):
         if deps.clipboard.write(rendered):
             print("report copied to clipboard", file=sys.stderr)
         else:
             print("warning: clipboard unavailable", file=sys.stderr)
 
-    return 0 if all_required_ok else 1
+    return 0 if all_ok else 1
 
 
-def _load_roadmap_or_none(deps: Deps, path: Path) -> Roadmap | None:
-    """Load the roadmap if present; warn on stderr and return None.
-
-    Mirrors the bootstrap behaviour. A roadmap that exists but
-    cannot be parsed is a real problem for the session: the roadmap
-    checks would be skipped silently, and the coder might not
-    notice. Warning on stderr surfaces the problem without changing
-    the exit code, because a phase may legitimately be running
-    without a roadmap (e.g. a development phase started before
-    freezing).
-    """
-    if not deps.fs.exists(path):
-        return None
-    try:
-        return roadmap_mod.load(deps.fs, path)
-    except HarnessError as exc:
-        print(f"warning: could not load roadmap: {exc}", file=sys.stderr)
-        return None
+def _current_task(state, deps: Deps, config):
+    """Return `(task_id, task_or_none)` for the current position."""
+    if is_planning_phase(state):
+        return "planning", None
+    plan_path = deps.project_root / config.plan["path"]
+    if not deps.fs.exists(plan_path):
+        return None, None
+    plan = plan_mod.load(deps.fs, plan_path)
+    if state.plan_position < 0 or state.plan_position >= len(plan.tasks):
+        return None, None
+    task = plan.tasks[state.plan_position]
+    return task.id, task
 
 
-def _parse_step_or_none(text: str) -> list[StepOp] | None:
-    """Parse a step message, returning `None` on any format error.
+def _planning_checks(ops, deps: Deps, config, plan_path) -> list[CheckResult]:
+    """Checks that run in a planning phase.
 
-    Distinguishes "the message had no blocks" from "the message
-    had blocks, but one was malformed". Both are errors for verify,
-    but the caller's message benefits from knowing which.
-    """
-    try:
-        return parse_step_message(text)
-    except FormatError:
-        return None
-
-
-def _planning_checks(
-    ops: list[StepOp],
-    deps: Deps,
-    config,
-    roadmap,
-) -> list[CheckResult]:
-    """Checks that run only in a planning phase.
-
-    A roadmap written by the architect is validated structurally so
-    that a malformed file cannot be frozen. The roadmap path is
-    resolved from config, not hard-coded. Paths are compared as
-    `PurePosixPath` on both sides so that `.harness//roadmap.toml`
-    and `.harness/roadmap.toml` compare equal.
+    A plan written by the planner is validated structurally so that
+    a malformed file cannot be frozen. The check runs only when the
+    current task writes the plan file.
     """
     out: list[CheckResult] = []
-
-    roadmap_rel = PurePosixPath(
-        str(config.roadmap.get("path", ".harness/roadmap.toml")).replace("\\", "/")
-    )
-    wrote_roadmap = any(
-        PurePosixPath(p.replace("\\", "/")) == roadmap_rel
+    plan_rel = normalize_rel(str(config.plan["path"]))
+    wrote_plan = any(
+        normalize_rel(op.path) == plan_rel
         for op in ops
-        for p in op_written_paths(op)
+        if hasattr(op, "path") and not hasattr(op, "src")
     )
-    if wrote_roadmap:
-        if roadmap is None:
-            out.append(
-                CheckResult(
-                    name="roadmap-structure",
-                    command=("roadmap-structure",),
-                    exit_code=1,
-                    stdout="",
-                    stderr="roadmap file was written but could not be parsed",
-                    required=True,
-                )
+    if not wrote_plan:
+        return out
+    if not deps.fs.exists(plan_path):
+        out.append(
+            CheckResult(
+                name="plan-structure",
+                command=("plan-structure",),
+                exit_code=1,
+                stdout="",
+                stderr="plan file was written but could not be parsed",
+                required=True,
             )
-        else:
-            problems = roadmap_mod.validate(roadmap, deps.project_root)
-            out.append(
-                CheckResult(
-                    name="roadmap-structure",
-                    command=("roadmap-structure",),
-                    exit_code=0 if not problems else 1,
-                    stdout="\n".join(problems) if problems else "ok",
-                    stderr="",
-                    required=True,
-                )
+        )
+        return out
+    try:
+        plan = plan_mod.load(deps.fs, plan_path)
+    except HarnessError as exc:
+        out.append(
+            CheckResult(
+                name="plan-structure",
+                command=("plan-structure",),
+                exit_code=1,
+                stdout="",
+                stderr=str(exc),
+                required=True,
             )
-
-    out.extend(run_configured(list(config.planning_commands), deps))
-    return out
-
-
-def _development_checks(
-    step_num: int,
-    deps: Deps,
-    config,
-    state,
-    roadmap,
-    ops: list[StepOp],
-) -> list[CheckResult]:
-    """Checks that run only in a development phase."""
-    out: list[CheckResult] = [check_compile(ops, deps)]
-
-    if is_roadmap_frozen(state) and roadmap is not None:
-        out.append(check_roadmap_step(step_num, state, roadmap))
-        current = roadmap_mod.find_step(roadmap, state.roadmap_step + 1)
-        if current is not None:
-            out.append(check_roadmap_changes(ops, current))
-            out.append(
-                check_roadmap_interfaces(
-                    deps.fs, deps.project_root, ops, current, roadmap
-                )
-            )
-
-        roadmap_path = deps.project_root / config.roadmap.get(
-            "path", ".harness/roadmap.toml"
         )
-        lock_path = deps.project_root / config.roadmap.get(
-            "lock_path", ".harness/roadmap.lock"
-        )
-        architecture_paths = [
-            deps.project_root / p for p in config.context.get("architecture", [])
-        ]
-        lock = lock_mod.load(deps.fs, lock_path)
-        arch_check = check_architecture_lock(
-            deps.fs,
-            lock,
-            deps.project_root,
-            roadmap_path,
-            architecture_paths,
-            required=bool(config.roadmap.get("lock_required", False)),
-        )
-        if arch_check is not None:
-            out.append(arch_check)
-
-    out.extend(run_configured(list(config.verify_commands), deps))
+        return out
+    out.append(check_plan_structure(plan, deps.project_root))
     return out
 
 

@@ -16,9 +16,9 @@ from typing import Any
 class PhaseKind(StrEnum):
     """Kind of phase a session belongs to.
 
-    `PLANNING` sessions produce design artifacts and a roadmap.
-    `DEVELOPMENT` sessions execute a frozen roadmap.
-    `UNSET` is the initial value before any `new-phase`.
+    `PLANNING` sessions produce a plan. `DEVELOPMENT` sessions
+    execute a frozen plan. `UNSET` is the initial value before any
+    `start`.
     """
 
     PLANNING = "planning"
@@ -26,36 +26,31 @@ class PhaseKind(StrEnum):
     UNSET = "unset"
 
 
-class DeviationType(StrEnum):
-    """Kind of deviation a step records against the roadmap.
+class PhaseStatus(StrEnum):
+    """Lifecycle status of the current phase.
 
-    `EXTRA_FILE`       — file not listed in `step.files`.
-    `MISSING_FILE`     — file listed in `step.files` not written.
-    `EXTRA_REMOVAL`    — file removed, not in `step.removes` or
-                         `step.moves.from`.
-    `MISSING_REMOVAL`  — file in `step.removes` or `step.moves.from`
-                         not removed.
-    `EXTRA_MOVE`       — a `MOVE` op that is not in `step.moves`,
-                         or whose `to` differs.
-    `MISSING_MOVE`     — a pair in `step.moves` with no `MOVE` op.
-    `INTERFACE_CHANGE` — public symbol added, removed, or renamed.
-    `BUGFIX_PRIOR`     — change to code from a previous step.
-    `ASSUMPTION`       — the spec was incomplete; the coder decided.
-    `PLAN_CORRECTION`  — the step spec was wrong, but workable.
-    `BLOCKER`          — the step is impossible as specified.
+    `OPEN` is the normal working state. `CLOSED` is set by `done`
+    on the last task or by `close` in an older protocol. `ABANDONED`
+    is set by `abandon`; the files stay on disk and the next phase
+    does not inherit.
     """
 
-    EXTRA_FILE = "extra-file"
-    MISSING_FILE = "missing-file"
-    EXTRA_REMOVAL = "extra-removal"
-    MISSING_REMOVAL = "missing-removal"
-    EXTRA_MOVE = "extra-move"
-    MISSING_MOVE = "missing-move"
-    INTERFACE_CHANGE = "interface-change"
-    BUGFIX_PRIOR = "bugfix-prior"
+    OPEN = "open"
+    CLOSED = "closed"
+    ABANDONED = "abandoned"
+
+
+class DeviationType(StrEnum):
+    """Kind of deviation a task records against the plan.
+
+    Three types only. `BLOCKER` and `PLAN_CORRECTION` close the
+    task as deviated and queue a follow-up. `ASSUMPTION` closes the
+    task as done and logs the deviation.
+    """
+
+    BLOCKER = "blocker"
     ASSUMPTION = "assumption"
     PLAN_CORRECTION = "plan-correction"
-    BLOCKER = "blocker"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,9 +109,9 @@ def op_paths(op: StepOp) -> tuple[str, ...]:
 def op_written_paths(op: StepOp) -> tuple[str, ...]:
     """Return only the paths that exist after the op.
 
-    Used by `check_compile`, by `check_roadmap_changes`, and by
-    `verify`'s `missing` computation. A `DeleteOp` contributes
-    nothing; a `MoveOp` contributes its destination.
+    Used by `check_compile`, by `check_task_changes`, and by the
+    task-existence precheck. A `DeleteOp` contributes nothing; a
+    `MoveOp` contributes its destination.
     """
     if isinstance(op, WriteOp):
         return (op.path,)
@@ -159,25 +154,26 @@ class CheckResult:
 
 @dataclass(frozen=True, slots=True)
 class Deviation:
-    """One recorded deviation from the roadmap.
+    """One recorded deviation from the plan.
 
-    `auto` is True when `verify` detected the deviation itself;
-    False when the coder declared it in a deviation file.
+    Three types only. `auto` is kept for schema compatibility and is
+    always False in 0.4.0: file-set mismatches are check failures,
+    not deviations.
     """
 
     type: DeviationType
     affected: tuple[str, ...]
     reason: str
     detail: str
-    auto: bool
+    auto: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class RoadmapMeta:
-    """Metadata header of `.harness/roadmap.toml`.
+class PlanMeta:
+    """Metadata header of `.harness/plan.toml`.
 
-    `version` is a positive integer. A new architect session that
-    replaces the roadmap must increment it.
+    `version` is a positive integer. A new planning phase that
+    replaces the plan must increment it.
     """
 
     version: int
@@ -185,8 +181,8 @@ class RoadmapMeta:
 
 
 @dataclass(frozen=True, slots=True)
-class RoadmapInterface:
-    """One public interface declared by the architect.
+class Interface:
+    """One public interface declared by the planner.
 
     `kind` is `"class"`, `"function"`, or `"constant"`. `module` is
     the relative path where the interface is expected to live.
@@ -200,88 +196,59 @@ class RoadmapInterface:
 
 
 @dataclass(frozen=True, slots=True)
-class RoadmapStep:
-    """One implementation step in the roadmap.
+class Task:
+    """One task in the plan.
 
-    `number` is unique and positive within a single roadmap version.
-    `depends_on` names earlier step numbers; cycles are rejected by
-    `roadmap.validate`.
+    `id` is a slug (`^[a-z][a-z0-9-]*$`, unique, ≤40 chars). It
+    replaces the numbered step from 0.3.x. `depends_on` names other
+    task ids; cycles are rejected by `plan.validate`.
 
-    `removes` lists files the step deletes; `moves` lists
-    `(src, dst)` pairs the step renames. Both default to empty and
-    are additive: an older roadmap without them still parses.
+    `removes` lists files the task deletes; `moves` lists
+    `(src, dst)` pairs the task renames. Both default to empty.
     """
 
-    number: int
+    id: str
     title: str
     goal: str
     files: tuple[str, ...]
     interfaces: tuple[str, ...]
     acceptance: tuple[str, ...]
-    depends_on: tuple[int, ...]
+    depends_on: tuple[str, ...] = ()
     removes: tuple[str, ...] = ()
     moves: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
-class Roadmap:
-    """Parsed `.harness/roadmap.toml`.
+class Plan:
+    """Parsed `.harness/plan.toml`.
 
-    Step numbers are local to this roadmap version. Replacing the
-    roadmap resets `state.roadmap_step` to zero.
+    Task order in the file is execution order. `meta.version`
+    increments per plan; a new plan resets `state.plan.position` to
+    zero.
     """
 
-    meta: RoadmapMeta
-    interfaces: tuple[RoadmapInterface, ...]
-    steps: tuple[RoadmapStep, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class LockEntry:
-    """One hashed file in a lock.
-
-    `path` is stored relative to the project root, using forward
-    slashes, so the lock is portable between machines and platforms.
-    """
-
-    path: str
-    sha256: str
-
-
-@dataclass(frozen=True, slots=True)
-class Lock:
-    """Parsed `.harness/roadmap.lock`.
-
-    Records the freeze: which phase produced it, the git commit at
-    freeze time, the roadmap version, and the hashes of every file
-    that was frozen. All paths are relative to the project root.
-    """
-
-    at: str
-    phase: str
-    commit: str
-    version: int
-    roadmap_sha256: str
-    architecture: tuple[LockEntry, ...]
+    meta: PlanMeta
+    interfaces: tuple[Interface, ...]
+    tasks: tuple[Task, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class Report:
     """The report produced by `verify` and sent back to the AI.
 
-    `apply_log` is the text written by the preceding `apply`. The
-    `deviations` and `roadmap_position` fields are populated only in
-    development phases with a frozen roadmap; otherwise they are
-    empty.
+    `task_id` is the task the report is about. `attempt` is the
+    consecutive failure count at the time the report was written
+    (1 for the first verify of a task).
     """
 
-    step_number: int
+    task_id: str
+    attempt: int
     apply_log: str
     checks: tuple[CheckResult, ...]
     commit_hash: str | None
     commit_message: str | None
     deviations: tuple[Deviation, ...]
-    roadmap_position: tuple[int, int] | None
+    plan_position: tuple[int, int] | None
     notes: str
     question: str
 
@@ -292,7 +259,7 @@ class SymbolInfo:
 
     `kind` is `"class"`, `"function"`, or `"constant"`. `signature`
     is the ast-unparsed declaration line for classes and functions;
-    for constants it is empty.
+    for constants it is `name = ...`.
     """
 
     name: str
@@ -318,10 +285,9 @@ class ModuleInfo:
 class Config:
     """Parsed `.harness/config.toml`.
 
-    See `application.config` for the loader and the expected shape of
-    the file. All fields have defaults derived from
-    `templates/config.toml`, so a minimal config works without all
-    sections present.
+    See `application.config` for the loader and the expected shape
+    of the file. All fields have defaults derived from the rendered
+    template, so a minimal config works without all sections.
     """
 
     harness_version: str
@@ -330,50 +296,43 @@ class Config:
     context: dict[str, Any]
     verify_commands: tuple[dict[str, Any], ...]
     planning_commands: tuple[dict[str, Any], ...]
-    roadmap: dict[str, Any]
+    plan: dict[str, Any]
     bootstrap: dict[str, Any]
     tokenizer_path: Path
     tokenizer_url: str
     read_max_tokens: int
+    notes_path: str
 
 
 @dataclass(frozen=True, slots=True)
 class State:
     """Parsed `.harness/state.toml`.
 
-    Written by the harness; read on every command that needs to know
-    the current phase, step, or roadmap position.
-
-    `current_step` counts steps within the current phase, so it is
-    reset by `new-phase`. `roadmap_step` counts positions within the
-    active roadmap version and is reset by `close --freeze`.
-
-    `last_commit` records the commit hash known at the last lifecycle
-    transition (`close`, `new-phase`, `rollback`). It is not kept in
-    sync with HEAD after every `verify` — the bootstrap header reads
-    HEAD directly from git for that.
-
-    `summary_phase` and `summary_written_at` record the most recent
-    phase summary recorded by `close`. The bootstrap shows
-    `.harness/summaries/{summary_phase}.md` as the only cross-phase
-    context the next session sees. Both default to empty strings:
-    a project has no summary until its first `close`.
+    State is the single source of truth for lifecycle facts in
+    0.4.0. There is no `handoff.md` and no separate roadmap lock
+    file: `state.plan` records the frozen plan's version and hash.
     """
 
     harness_version: str
-    current_phase: str
+    phase_name: str
     phase_kind: str
-    current_step: int
+    phase_status: str
+    phase_opened_at: str
+    phase_closed_at: str
+    plan_version: int
+    plan_sha256: str
+    plan_position: int
+    plan_frozen: bool
+    verify_ok: bool
+    verify_task_id: str
+    verify_at: str
+    failure_task_id: str
+    failure_check_name: str
+    failure_excerpt: str
+    failure_count: int
+    rollback_count: int
     last_commit: str
     last_commit_date: str
-    roadmap_version: int
-    roadmap_step: int
-    roadmap_frozen: bool
-    rollback_count: int
-    last_opened: str
-    last_closed: str
-    summary_phase: str = ""
-    summary_written_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,20 +357,19 @@ __all__ = [
     "DeleteOp",
     "Deviation",
     "DeviationType",
-    "Lock",
-    "LockEntry",
+    "Interface",
     "ModuleInfo",
     "MoveOp",
     "PhaseKind",
+    "PhaseStatus",
+    "Plan",
+    "PlanMeta",
     "ProcessResult",
     "Report",
-    "Roadmap",
-    "RoadmapInterface",
-    "RoadmapMeta",
-    "RoadmapStep",
     "State",
     "StepOp",
     "SymbolInfo",
+    "Task",
     "WriteOp",
     "op_paths",
     "op_written_paths",

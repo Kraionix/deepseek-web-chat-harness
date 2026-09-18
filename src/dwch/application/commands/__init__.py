@@ -15,16 +15,21 @@ from collections.abc import Callable
 from typing import Any
 
 from ..deps import Deps
+from .abandon import cmd_abandon
 from .apply import cmd_apply
-from .bootstrap import cmd_bootstrap
-from .close import cmd_close
 from .count import cmd_count
+from .done import cmd_done
+from .fix import cmd_fix
 from .health import cmd_health
 from .init import cmd_init
+from .log import cmd_log
 from .map import cmd_map
-from .new_phase import cmd_new_phase
+from .next import cmd_next
 from .read import cmd_read
 from .rollback import cmd_rollback
+from .start import cmd_start
+from .status import cmd_status
+from .tree import cmd_tree
 from .verify import cmd_verify
 
 CommandFn = Callable[[Any, Deps], int]
@@ -32,16 +37,21 @@ CommandFn = Callable[[Any, Deps], int]
 
 COMMANDS: dict[str, CommandFn] = {
     "init": cmd_init,
-    "health": cmd_health,
-    "bootstrap": cmd_bootstrap,
+    "start": cmd_start,
+    "next": cmd_next,
     "apply": cmd_apply,
     "verify": cmd_verify,
-    "close": cmd_close,
+    "done": cmd_done,
+    "fix": cmd_fix,
+    "abandon": cmd_abandon,
+    "status": cmd_status,
+    "log": cmd_log,
+    "health": cmd_health,
     "read": cmd_read,
     "map": cmd_map,
-    "rollback": cmd_rollback,
-    "new-phase": cmd_new_phase,
+    "tree": cmd_tree,
     "count": cmd_count,
+    "rollback": cmd_rollback,
 }
 
 

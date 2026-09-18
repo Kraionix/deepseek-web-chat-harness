@@ -15,9 +15,6 @@ from ..domain.models import Config
 from ..shared.errors import ConfigError
 from .ports import FilesystemPort
 
-# Defaults applied when a section or key is missing from the config.
-# Kept in one place so the loader and the template agree on what an
-# "empty" config means.
 _DEFAULT_PATHS = {
     "steps": "steps",
 }
@@ -25,19 +22,18 @@ _DEFAULT_PATHS = {
 _DEFAULT_CONTEXT = {
     "essential": ["AGENTS.md", "STATE.md"],
     "references": [],
-    "architecture": [],
-    "map_root": "",
+    "architecture": ["docs/architecture.md"],
+    "map_root": "src",
+    "notes": ".harness/notes.md",
 }
 
-_DEFAULT_ROADMAP = {
-    "path": ".harness/roadmap.toml",
-    "lock_path": ".harness/roadmap.lock",
+_DEFAULT_PLAN = {
+    "path": ".harness/plan.toml",
     "deviations_path": ".harness/deviations",
-    "lock_required": False,
 }
 
 _DEFAULT_BOOTSTRAP = {
-    "max_tokens": 10000,
+    "max_tokens": 5000,
     "reports_current_phase": 1,
     "recent_deviations": 10,
     "include_module_map": True,
@@ -52,11 +48,13 @@ _DEFAULT_READ_MAX_TOKENS = 6000
 
 # Version of the config file format. Independent of the package
 # version: a patch release that does not change the format keeps
-# this value, and existing `.harness/config.toml` files keep working.
+# this value, and existing `.harness/config.toml` files keep
+# working.
 #
-# 0.3.0 replaces `bootstrap.recent_reports` with
-# `bootstrap.reports_current_phase`. Old configs are rejected.
-_CONFIG_FORMAT_VERSION = "0.3.0"
+# 0.4.0 replaces `[roadmap]` with `[plan]`, adds `[context].notes`,
+# and lowers `[bootstrap].max_tokens` to 5000. Old configs are
+# rejected.
+_CONFIG_FORMAT_VERSION = "0.4.0"
 
 
 def load_config(fs: FilesystemPort, project_root: Path) -> Config:
@@ -66,7 +64,7 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
     Post: returns a `Config` with every field populated. Missing
           sections fall back to defaults.
     Raises: `ConfigError` when the file is missing, malformed, or
-          when `harness_version` is incompatible with this build.
+          when the format version is incompatible with this build.
     """
     config_path = project_root / ".harness" / "config.toml"
     if not fs.exists(config_path):
@@ -92,7 +90,7 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
 
     paths = {**_DEFAULT_PATHS, **data.get("paths", {})}
     context = {**_DEFAULT_CONTEXT, **data.get("context", {})}
-    roadmap = {**_DEFAULT_ROADMAP, **data.get("roadmap", {})}
+    plan = {**_DEFAULT_PLAN, **data.get("plan", {})}
     bootstrap = {**_DEFAULT_BOOTSTRAP, **data.get("bootstrap", {})}
     verify_commands = _validate_commands(
         data.get("verify", {}).get("commands", []),
@@ -103,19 +101,18 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
         "verify.planning_commands",
     )
 
-    _validate_paths(config=paths, context=context, roadmap=roadmap)
+    _validate_paths(config=paths, context=context, plan=plan)
 
     tokenizer = data.get("tokenizer", {})
     tokenizer_url = str(tokenizer.get("url", _DEFAULT_TOKENIZER_URL))
 
-    # Tokenizer data lives under `.harness/data/` inside the project.
-    # The config may override the filename; any override is resolved
-    # relative to the data directory.
     tokenizer_filename = str(tokenizer.get("filename", "deepseek_tokenizer.json"))
     tokenizer_path = project_root / ".harness" / "data" / tokenizer_filename
 
     read_section = data.get("read", {})
     read_max_tokens = int(read_section.get("max_tokens", _DEFAULT_READ_MAX_TOKENS))
+
+    notes_path = str(context.get("notes", _DEFAULT_CONTEXT["notes"]))
 
     return Config(
         harness_version=version,
@@ -124,11 +121,12 @@ def load_config(fs: FilesystemPort, project_root: Path) -> Config:
         context=context,
         verify_commands=verify_commands,
         planning_commands=planning_commands,
-        roadmap=roadmap,
+        plan=plan,
         bootstrap=bootstrap,
         tokenizer_path=tokenizer_path,
         tokenizer_url=tokenizer_url,
         read_max_tokens=read_max_tokens,
+        notes_path=notes_path,
     )
 
 
@@ -154,17 +152,17 @@ steps = "steps"
 # Files copied verbatim into the bootstrap.
 essential = ["AGENTS.md", "STATE.md"]
 # Files listed by name only; the AI asks for them on demand.
-references = ["docs/decisions.md"]
-# Frozen architecture documents included in every development bootstrap.
+references = []
+# Architecture documents included in the bootstrap.
 architecture = ["docs/architecture.md"]
 # Root of the module interface map.
 map_root = "src"
+# Project notes: conventions, external APIs, style.
+notes = ".harness/notes.md"
 
-[roadmap]
-path = ".harness/roadmap.toml"
-lock_path = ".harness/roadmap.lock"
+[plan]
+path = ".harness/plan.toml"
 deviations_path = ".harness/deviations"
-lock_required = false
 
 [verify]
 # Commands run by `dwch verify` in order. `required = false` means a
@@ -227,10 +225,10 @@ def _validate_commands(raw: object, label: str) -> tuple[dict[str, Any], ...]:
     return tuple(out)
 
 
-def _validate_paths(*, config: dict, context: dict, roadmap: dict) -> None:
+def _validate_paths(*, config: dict, context: dict, plan: dict) -> None:
     """Reject absolute paths and parent traversal in every path field.
 
-    Pre:  `config`, `context`, `roadmap` are the merged dicts from
+    Pre:  `config`, `context`, `plan` are the merged dicts from
           `load_config`.
     Post: returns None on success.
     Raises: `ConfigError` if any path-typed value is not relative, or
@@ -248,16 +246,19 @@ def _validate_paths(*, config: dict, context: dict, roadmap: dict) -> None:
         for entry in entries:
             _validate_relative_path(entry, f"context.{key}")
 
-    # `map_root` may be empty: an empty value means "no map". Only
-    # a non-empty value is validated.
+    # `map_root` and `notes` may be empty: an empty value means "no
+    # map" / "no notes". Only a non-empty value is validated.
     map_root = context.get("map_root", "")
     if map_root:
         _validate_relative_path(map_root, "context.map_root")
+    notes = context.get("notes", "")
+    if notes:
+        _validate_relative_path(notes, "context.notes")
 
-    for key in ("path", "lock_path", "deviations_path"):
-        value = roadmap.get(key, "")
+    for key in ("path", "deviations_path"):
+        value = plan.get(key, "")
         if value:
-            _validate_relative_path(value, f"roadmap.{key}")
+            _validate_relative_path(value, f"plan.{key}")
 
 
 def _validate_relative_path(value: object, label: str) -> None:

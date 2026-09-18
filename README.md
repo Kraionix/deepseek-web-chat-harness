@@ -1,33 +1,47 @@
 # deepseek-web-chat-harness
 
-A minimal agent harness for developing software in a web chat session,
-where the model has no read access, no write access, no execution, and
-no way to iterate. The user is the sole I/O channel: they copy messages
-from the chat, run commands, and paste results back.
+A minimal agent harness for developing software in a web chat
+session, where the model has no read access, no write access, no
+execution, and no way to iterate. The user is the sole I/O channel:
+they copy messages from the chat, run commands, and paste results
+back.
 
-`dwch` (the CLI) closes that gap with twelve commands covering the full
-session lifecycle: bootstrap the context, apply a step's files, verify
-the result, commit, read a file on demand, roll back, start a new phase,
-close the session. It also counts tokens precisely (using DeepSeek's
-real BPE tokenizer) so the model knows whether a bootstrap fits.
+`dwch` (the CLI) closes that gap with sixteen commands covering the
+full session lifecycle: bootstrap the context, apply a task's
+files, verify the result, commit, read a file on demand, roll back,
+start a new phase, close the session. It also counts tokens
+precisely (using DeepSeek's real BPE tokenizer) so the model knows
+whether a bootstrap fits.
 
-The harness supports **roadmap-driven development**: a planning
-session produces a machine-readable roadmap, `close --freeze` locks
-it, and a development session executes it step by step, recording
-every deviation.
+## What 0.4.0 is
 
-Development is split into **phases**, and every phase runs in its
-own chat. At the end of a phase the AI writes a short summary to
-`.harness/summaries/{phase}.md` via `dwch apply summary`. The next
-phase's bootstrap shows that summary as `previous_summary` — the
-only cross-phase context the new session receives. `dwch close`
-refuses to run without a summary, and `dwch new-phase` refuses to
-run while the previous phase is still open.
+0.4.0 turns the harness from a protocol description into an agent
+workspace.
+
+- **`state.toml` is the single source of truth.** There is no
+  `handoff.md` and no separate lock file. The frozen plan's hash
+  lives in state.
+- **The bootstrap is six ordered layers.** L0 meta, L1 contract,
+  L2 tools, L3 session state, L4 context, L5 current task, L6
+  notes. L1 is never truncated.
+- **A plan is a list of tasks keyed by id**, not numbered steps.
+  The AI decides task granularity; the contract explains the
+  rule.
+- **A failed verification is a working state.** `verify` writes
+  the report, increments `state.failure.count`, and puts a short
+  hint on the clipboard. `dwch fix` produces a fix-bootstrap for a
+  fresh chat. At three consecutive failures, a warning is added to
+  both.
+- **One contract document.** `contract.md` carries the block
+  grammar, the plan/task/deviation schemas, the behavioral rules,
+  the tool categories, and the notes-vs-contract rule. It is
+  never truncated.
 
 ## Requirements
 
 - Python 3.11 or newer (uses `tomllib` and `StrEnum`).
-- `git` on `PATH` for `verify`, `close`, `new-phase`, and `rollback`.
+- `git` on `PATH` for `done`, `start`, `abandon`, `rollback`,
+  `log`, and any command that reads HEAD.
 - Optional: `ruff` if the default lint check is enabled in
   `.harness/config.toml`.
 - Network access during `dwch init` to download the tokenizer from
@@ -64,54 +78,30 @@ directory and never touches the network.
 cd /path/to/your/project
 dwch init
 dwch health
-dwch new-phase 00-architecture --kind planning
-dwch bootstrap --clipboard
+dwch start "design the API"
+dwch next
 ```
 
-Then open a fresh web chat, paste the bootstrap, and let the model
-produce design artifacts and a roadmap. When the planning phase is
-done, ask the AI for a closing summary, then:
+`dwch next` copies a bootstrap to the clipboard. Open a fresh web
+chat, paste it, and let the model produce design artifacts and a
+plan. For each task:
 
 ```
-dwch apply summary
-dwch close --freeze
+dwch apply          # reads the message from the clipboard
+dwch verify         # runs checks; hints to clipboard on failure
+dwch done           # commits task {id}: applied and verified
 ```
 
-Start the development phase:
-
-```
-dwch new-phase 01-implementation --kind development
-dwch bootstrap --clipboard
-```
-
-For each roadmap step:
-
-```
-dwch apply 01
-dwch verify 01
-```
-
-`verify` commits the step, updates state, and writes the report to
-`steps/{phase}/report-01.txt`. Paste that report back into the chat.
-
-When the phase ends:
-
-```
-dwch apply summary
-dwch close
-```
-
-Close the chat, start the next phase, paste a fresh bootstrap.
+When the last task in a planning phase is done, the plan is
+hashed and frozen automatically; when it is done in a development
+phase, the plan position advances.
 
 ## What `init` creates
 
 - `.harness/config.toml` — user-editable configuration.
-- `.harness/state.toml` — current phase, kind, step counters.
-- `.harness/session-protocol.md`, `step-format.md`,
-  `report-format.md`, `planning-handoff.md`,
-  `development-handoff.md`, `roadmap-format.md`,
-  `deviation-format.md`, `toolbox.md` — protocol documents
-  included in every bootstrap.
+- `.harness/state.toml` — phase, plan position, verify result.
+- `.harness/contract.md` — the contract, included in every
+  bootstrap as L1.
 - `.harness/data/deepseek_tokenizer.json` — downloaded tokenizer.
 - `.harness/.gitignore` — ignores only `data/`.
 - `steps/.gitignore` — makes `steps/` self-ignoring.
@@ -120,78 +110,77 @@ Close the chat, start the next phase, paste a fresh bootstrap.
 together with the project: they are the session's portable state
 and its artifacts. The tokenizer file is local cache.
 
-`.harness/roadmap.toml` appears only after a planning phase writes
-it. `.harness/roadmap.lock` appears only after `close --freeze`.
-`.harness/summaries/` appears after the first `apply summary`.
-
 `dwch init --force` regenerates the files the harness owns and can
-safely rebuild: `config.toml`, the shipped templates, and the
-tokenizer cache. It does not touch `state.toml`,
-`.harness/.gitignore`, or `.harness/handoff.md`, because those
-carry session-local state.
+safely rebuild: `config.toml`, `contract.md`, and the tokenizer
+cache. It does not touch `state.toml` or `.harness/.gitignore`.
 
-## The twelve commands
+## The sixteen commands
 
 | Command | Purpose |
 |---|---|
 | `dwch init` | Install harness into the current project. |
-| `dwch health` | Check environment and project state. |
-| `dwch bootstrap` | Build the opening message for a new chat. |
-| `dwch apply NN` | Parse a step message and execute its ops. |
-| `dwch apply summary` | Write the current phase's summary. |
-| `dwch verify NN` | Run checks, commit, produce the report. |
-| `dwch close` | Finalize the phase, optionally freeze the roadmap. |
-| `dwch read PATH` | Wrap a file in step markers for the chat. |
-| `dwch map` | Print the module interface map. |
-| `dwch rollback` | Undo the last step. |
-| `dwch new-phase NAME` | Start a new phase (planning or development). |
+| `dwch start "goal"` | Begin a phase. Kind inferred unless `--kind`. |
+| `dwch next` | Assemble the current task's bootstrap; copy to clipboard. |
+| `dwch apply` | Parse a block message and execute its ops. |
+| `dwch verify` | Run checks, write the report, hint on failure. |
+| `dwch done` | Commit the current task; close the phase on the last one. |
+| `dwch fix` | Assemble a fix-bootstrap for the last failure. |
+| `dwch abandon` | Mark the phase abandoned; leave the files. |
+| `dwch status` | Print the current state. |
+| `dwch log [N]` | Recent lifecycle events from git. |
+| `dwch health` | Environment and project sanity. |
+| `dwch read PATH` | Wrap a file in block markers for the chat. |
+| `dwch map [ROOT]` | Module interface map. |
+| `dwch tree [ROOT]` | Directory tree. |
 | `dwch count PATH` | Count tokens in a file or tree. |
-
-`apply` is one command with two forms. `apply NN` writes a step's
-files; `apply summary` writes the phase summary. Both accept
-`--from-file`.
-
-A summary is written once. `apply summary` refuses to overwrite an
-existing file; if you need to rewrite one, delete it first.
+| `dwch rollback` | Undo the last `task ...` commit. |
 
 ## Lifecycle
 
 1. `init` writes the harness into `.harness/` and `steps/`.
-2. `new-phase NAME --kind planning` starts a planning phase.
-3. Each planning step: `apply` writes files, `verify` checks.
-4. `apply summary` writes the phase summary.
-5. `close --freeze` validates the roadmap, writes
-   `.harness/roadmap.lock`, marks state frozen, and commits.
-6. `new-phase NAME --kind development` starts a development phase.
-7. Each development step: `apply` writes files, `verify` runs the
-   built-in roadmap checks and commits on success.
-8. `apply summary` writes the phase summary.
-9. `close` finalizes the development phase.
-10. A new architect session can produce a new roadmap version; the
-    old one remains in git history.
+2. `start "goal"` opens a planning phase.
+3. Each task: `apply` writes files, `verify` checks.
+4. `done` commits. When the plan is on disk and valid, the phase
+   closes and the plan is frozen.
+5. `start "goal"` (now inferred as development) opens the
+   development phase.
+6. Each task: `apply`, `verify`, `done`. On the last task, the
+   phase closes.
+7. `start "goal"` opens a fresh planning phase for the next
+   version.
 
-## Step message format
+## Block message format
 
-A step message contains one or more blocks. Three block kinds
-exist: file, delete, and move.
+A message contains one or more blocks. Three block kinds exist:
+file, delete, and move.
 
-A file block opens with
-&lt;&lt;&lt;FILE:relative/path.py&gt;&gt;&gt;, with the file
-content verbatim, and closes with a line containing only
-&lt;&lt;&lt;END&gt;&gt;&gt;.
+A file block opens with `<<<FILE:relative/path.py>>>`, with the
+file content verbatim, and closes with a line containing only
+`<<<END>>>`.
 
-A delete block opens with
-&lt;&lt;&lt;DELETE:relative/path.py&gt;&gt;&gt;, with an empty
-body (whitespace only), and closes with the end marker.
+A delete block opens with `<<<DELETE:relative/path.py>>>`, with an
+empty body (whitespace only), and closes with the end marker.
 
-A move block opens with
-&lt;&lt;&lt;MOVE:relative/from.py:relative/to.py&gt;&gt;&gt;,
+A move block opens with `<<<MOVE:relative/from.py:relative/to.py>>>`,
 with an empty body, and closes with the end marker. `MOVE` takes
 exactly two paths separated by a single colon.
 
 Every path is checked before any write: relative, no `..`, no
-symlink components, no reserved names. A step that touches a
+symlink components, no reserved names. A task that touches a
 tracked file with uncommitted changes is refused.
 
-The AI's reply for a phase summary is exactly one file block for
-`.harness/summaries/{phase}.md`.
+## Bootstrap layers
+
+```
+L0  Meta           ~50 tokens         never truncated
+L1  Contract       ~1200 tokens       never truncated
+L2  Tools          ~200 tokens        never truncated
+L3  Session state  facts              never truncated
+L4  Context        variable           truncated first
+L5  Current task   variable           never truncated
+L6  Notes          variable           truncated second
+```
+
+Truncation order: L6 first, then L4 (notes, essential, module_map,
+commits, reports). L1 is never truncated: the contract always
+fits.

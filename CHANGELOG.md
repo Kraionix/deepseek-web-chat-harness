@@ -3,6 +3,102 @@
 Follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-18
+
+Agent-workspace release. The harness gains a task model, an
+authoritative state file, a six-layer bootstrap, and a first-class
+failure loop. No backward compatibility with 0.3.x state, config,
+or plan.
+
+### Added
+
+- `contract.md`, a single static document carrying the block
+  grammar, the plan/task/deviation schemas, the behavioral rules,
+  the tool categories, and the notes-vs-contract rule. It is the
+  L1 bootstrap layer and is never truncated.
+- Six bootstrap layers: L0 meta, L1 contract, L2 tools, L3 session
+  state, L4 context, L5 current task, L6 notes. Truncation order is
+  L6 first, then L4.
+- Task model. `plan.toml` lists tasks keyed by `id` (a slug), not
+  numbered steps. Task order is execution order; `depends_on`
+  forms a graph with no cycles.
+- Commands: `start`, `next`, `done`, `fix`, `abandon`, `status`,
+  `log`, `tree`.
+- `dwch next` — read-only. Assembles the current task's bootstrap
+  and writes it to the clipboard.
+- `dwch fix` — read-only. Assembles a fix-bootstrap for the last
+  failure: L5 is the failure description, not the task spec.
+- On every failed `verify`, a short hint is placed on the
+  clipboard. At three consecutive failures, a warning is added to
+  the hint and to the fix-bootstrap's L0.
+- `state.failure.count` — consecutive failures on the current task.
+  Reset by a successful `verify` or a re-`apply`.
+- `state.plan.sha256` — hash of a frozen plan. Replaces the
+  architecture-lock file.
+- Deviation types shrink to three: `blocker`, `assumption`,
+  `plan-correction`. One file per task:
+  `.harness/deviations/{task_id}.toml`.
+
+### Changed
+
+- **Breaking:** `state.toml` schema replaced. New sections:
+  `[phase]` (name, kind, status, opened_at, closed_at), `[plan]`
+  (version, sha256, position, frozen), `[verify]` (ok, task_id, at),
+  `[failure]` (task_id, check_name, excerpt, count), `[rollback]`
+  (count), `[session]` (last_commit, last_commit_date).
+- **Breaking:** `config.toml` requires `[harness].version = "0.4.0"`.
+  `[roadmap]` is replaced by `[plan]` (path, deviations_path).
+  `[context].notes` is new. `[bootstrap].max_tokens` drops to 5000.
+- **Breaking:** `plan.toml` uses `id`-keyed tasks. `meta.version`
+  is a positive integer, increments per plan. Interfaces are
+  referenced by tasks.
+- **Breaking:** `apply` and `verify` lose the positional step
+  argument. They operate on the current task, determined from
+  state and plan.
+- **Breaking:** `apply` no longer has a `summary` form. Phase
+  summaries are gone; the contract and state carry the cross-phase
+  context.
+- **Breaking:** `verify` no longer commits. Committing is `done`'s
+  job, and only after `verify` reports success.
+- **Breaking:** `rollback` refuses unless HEAD subject begins with
+  `task `.
+- `apply` resets `state.verify.ok` to False. A re-applied task is
+  not verified in its new form.
+- `done` advances `state.plan.position` in development. In
+  planning, the position stays at 0; the phase closes when the
+  plan is on disk and validates.
+- `done` on the last task closes the phase: it commits
+  `task {id}: applied and verified`, then
+  `chore: close phase {name}`. In planning, it also computes
+  `plan.sha256` and marks state frozen.
+- `next` and `fix` replace `bootstrap`. `start` replaces
+  `new-phase`. `done` replaces `close`.
+
+### Removed
+
+- `.harness/handoff.md`. State is the single source of truth; the
+  bootstrap L5 replaces the handoff prose.
+- `.harness/summaries/`. Cross-phase context is gone.
+- `.harness/roadmap.lock`. The frozen plan's hash lives in
+  `state.plan.sha256`.
+- The architecture lock. Architecture is context, not contract.
+  Only `plan.toml` is hashed.
+- Auto-deviations. A set-diff mismatch is a check failure, not a
+  deviation.
+- Commands `bootstrap`, `close`, `new-phase`.
+- Templates `development-handoff.md`, `planning-handoff.md`,
+  `session-protocol.md`, `step-format.md`, `roadmap-format.md`,
+  `deviation-format.md`, `toolbox.md`, `report-format.md`. All
+  merged into `contract.md`.
+- The `--tree` flag on `map`. `tree` is now its own command.
+
+### Fixed
+
+- `verify`'s failure report now uses the numeric `attempt` count
+  rather than the step number. A task that failed twice produces
+  `report-1.txt` and `report-2.txt`, not two files that would sort
+  lexicographically wrong.
+
 ## [0.3.3] - 2026-09-18
 
 Minor release with three threads: the step message format gains

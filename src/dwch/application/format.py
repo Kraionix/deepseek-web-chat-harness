@@ -1,24 +1,14 @@
-"""Parse step messages and render reports.
+"""Parse block messages and render reports.
 
-The step format has three block kinds, delimited by
-`<<<FILE:path>>>`, `<<<DELETE:path>>>`, and
-`<<<MOVE:src:dst>>>`, each closed by `<<<END>>>`. Everything
-outside a block is ignored. There is no escaping and no nesting;
-the parser is a single forward scan that tracks whether it is
-inside a block, so a literal `<<<FILE:...>>>` line inside content
-is not a marker.
-
-Step numbers are canonicalized here: `1`, `01`, and `001` all name
-the same step, and every command that builds a step filename goes
-through `format_step`. Likewise, `report_sort_key` extracts the
-numeric part so that `report-1.txt` and `report-10.txt` sort in
-numeric rather than lexicographic order.
+The block format has three kinds, delimited by `<<<FILE:path>>>`,
+`<<<DELETE:path>>>`, and `<<<MOVE:src:dst>>>`, each closed by
+`<<<END>>>`. Everything outside a block is ignored. There is no
+escaping and no nesting; the parser is a single forward scan that
+tracks whether it is inside a block, so a literal `<<<FILE:...>>>`
+line inside content is not a marker.
 """
 
 from __future__ import annotations
-
-import re
-from pathlib import Path
 
 from ..domain.models import (
     CheckResult,
@@ -43,24 +33,9 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_MESSAGE_BYTES = 50 * 1024 * 1024
 MAX_SNAPSHOT_TOTAL_BYTES = 50 * 1024 * 1024
 
-# Paths that `DELETE` and `MOVE` may not touch. `FILE` does not
-# consult this list: rewriting `roadmap.toml` during a planning
-# phase is normal, deleting or moving it is not.
-_PROTECTED_EXACT = frozenset(
-    {
-        ".harness/state.toml",
-        ".harness/config.toml",
-        ".harness/roadmap.lock",
-        ".harness/roadmap.toml",
-        ".harness/.gitignore",
-    }
-)
-
-_REPORT_RE = re.compile(r"^report-(\d+)\.txt$")
-
 
 def parse_step_message(text: str) -> list[StepOp]:
-    """Parse a step message into a list of `StepOp`.
+    """Parse a block message into a list of `StepOp`.
 
     Pre:  `text` is the raw content of the AI's message.
     Post: returns a list of ops, in the order the blocks appeared.
@@ -69,15 +44,10 @@ def parse_step_message(text: str) -> list[StepOp]:
           block, an empty path, a duplicate path, a non-empty
           `DELETE` or `MOVE` body, a `MOVE` without exactly one
           `:`, an unknown keyword, or no blocks at all.
-
-    Trailing whitespace around the marker lines is tolerated: the
-    parser compares an `rstrip()`-ed line. A human copying from a
-    chat window sometimes leaves a trailing space after
-    `<<<END>>>`.
     """
     if len(text.encode("utf-8")) > MAX_MESSAGE_BYTES:
         raise FormatError(
-            f"step message is {len(text.encode('utf-8'))} bytes; "
+            f"message is {len(text.encode('utf-8'))} bytes; "
             f"limit is {MAX_MESSAGE_BYTES}"
         )
 
@@ -157,7 +127,7 @@ def parse_step_message(text: str) -> list[StepOp]:
 
 
 def _check_unique_paths(ops: list[StepOp]) -> None:
-    """Reject a step where any path appears in more than one op."""
+    """Reject a message where any path appears in more than one op."""
     seen: set[str] = set()
     for op in ops:
         for p in op_paths(op):
@@ -167,7 +137,7 @@ def _check_unique_paths(ops: list[StepOp]) -> None:
             seen.add(norm)
 
 
-def validate_paths(ops: list[StepOp], project_root: Path) -> None:
+def validate_paths(ops: list[StepOp], project_root) -> None:
     """Reject unsafe paths before any write happens.
 
     Every path of every op goes through `safe_path`, the single
@@ -187,15 +157,12 @@ def detect_marker_collision(op: WriteOp) -> None:
     A content that contains the literal `<<<END>>>` on its own line
     (modulo trailing whitespace) would be interpreted as the closing
     marker on a subsequent re-parse. The parser cannot distinguish
-    the two. Refusing the step is safer than writing a file that
+    the two. Refusing the message is safer than writing a file that
     breaks future tooling.
 
     A literal `<<<FILE:...>>>` line inside content is *not* a
     problem: the parser tracks whether it is inside a block, so an
     opening marker only counts when it appears outside one.
-
-    `DELETE` and `MOVE` bodies are empty, so there is nothing to
-    check for them.
     """
     for line in op.content.split("\n"):
         if line.rstrip() == FILE_CLOSE:
@@ -203,55 +170,6 @@ def detect_marker_collision(op: WriteOp) -> None:
                 f"content of {op.path!r} contains a bare "
                 f"{FILE_CLOSE!r} line, which would break the parser"
             )
-
-
-def is_protected(rel: str) -> bool:
-    """True when `rel` is a path `DELETE` or `MOVE` may not touch."""
-    norm = normalize_rel(rel)
-    if norm in _PROTECTED_EXACT:
-        return True
-    return norm == "steps" or norm.startswith("steps/")
-
-
-def format_step(number: int) -> str:
-    """Return the canonical filename fragment for a step number.
-
-    Two digits for numbers below 100, more when needed: `1` -> `01`,
-    `100` -> `100`. Every command that builds `step-NN.txt`,
-    `apply-NN.log`, or `report-NN.txt` goes through this function so
-    the names agree across commands.
-    """
-    return f"{number:02d}"
-
-
-def parse_step_arg(raw: str) -> int:
-    """Parse a step argument into a canonical positive integer.
-
-    Accepts `1`, `01`, `001`. Rejects non-integers and non-positive
-    values with `FormatError`. Callers convert to exit code 2 for
-    CLI input; internal callers let it propagate.
-    """
-    try:
-        n = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise FormatError(f"step must be a positive integer, got {raw!r}") from exc
-    if n < 1:
-        raise FormatError(f"step must be >= 1, got {n}")
-    return n
-
-
-def report_sort_key(path: Path) -> int:
-    """Return the numeric step number from a `report-NN.txt` filename.
-
-    Non-matching names sort to -1 so they end up first under
-    `sorted(..., key=report_sort_key)`. `[-n:]` then picks the
-    numerically newest reports, not the lexicographically newest
-    (`report-1.txt, report-10.txt, report-2.txt, ...`).
-    """
-    match = _REPORT_RE.match(path.name)
-    if match is None:
-        return -1
-    return int(match.group(1))
 
 
 def render_report(report: Report) -> str:
@@ -262,7 +180,7 @@ def render_report(report: Report) -> str:
     wondering if it was skipped.
     """
     lines: list[str] = []
-    lines.append(f"=== Step {report.step_number:02d} report ===")
+    lines.append(f"=== Task {report.task_id} report (attempt {report.attempt}) ===")
     lines.append("")
 
     lines.append("apply output:")
@@ -292,9 +210,9 @@ def render_report(report: Report) -> str:
         lines.append("not committed")
     lines.append("")
 
-    if report.roadmap_position is not None:
-        before, after = report.roadmap_position
-        lines.append(f"roadmap position: {before} -> {after}")
+    if report.plan_position is not None:
+        before, after = report.plan_position
+        lines.append(f"plan position: {before} -> {after}")
         lines.append("")
 
     lines.append("deviations:")
@@ -315,12 +233,39 @@ def render_report(report: Report) -> str:
     return "\n".join(lines)
 
 
-def summarize_check(check: CheckResult) -> str:
-    """One-line summary of a `CheckResult` for the CLI's stdout.
+def render_hint(report: Report) -> str:
+    """Render a short hint (≤10 lines) placed on the clipboard.
 
-    Used by `verify` to print a progress line before writing the
-    full report.
+    The hint names the first failing required check and the two
+    ways forward: `dwch fix` for a fresh fix-bootstrap, or fix and
+    re-run `apply` + `verify`. The full report is on disk.
     """
+    lines: list[str] = [
+        f"verify FAILED: task {report.task_id} (attempt {report.attempt})",
+    ]
+    first_failed = next(
+        (c for c in report.checks if c.exit_code != 0 and c.required),
+        None,
+    )
+    if first_failed is not None:
+        lines.append(f"  first failure: {first_failed.name}")
+        excerpt = (first_failed.stdout or first_failed.stderr or "").splitlines()
+        for ln in excerpt[:3]:
+            lines.append(f"    {ln}")
+    if report.commit_hash is None:
+        lines.append("commit: skipped")
+    lines.append("")
+    lines.append("Next:")
+    lines.append("  - `dwch fix`  (fix-bootstrap for a fresh chat)")
+    lines.append("  - or fix and re-run `dwch apply` then `dwch verify`")
+    lines.append(
+        f"  - or declare a deviation at .harness/deviations/{report.task_id}.toml"
+    )
+    return "\n".join(lines[:10])
+
+
+def summarize_check(check: CheckResult) -> str:
+    """One-line summary of a `CheckResult` for the CLI's stdout."""
     status = "OK" if check.exit_code == 0 else f"FAIL({check.exit_code})"
     suffix = "" if check.required else " optional"
     return f"{check.name}: {status}{suffix}"
@@ -329,9 +274,8 @@ def summarize_check(check: CheckResult) -> str:
 def summarize_deviation(dev: Deviation) -> str:
     """One-line summary of a `Deviation` for the report body."""
     affected = ", ".join(dev.affected) or "-"
-    flag = "auto" if dev.auto else "declared"
     detail = f" — {dev.detail}" if dev.detail else ""
-    return f"- {dev.type.value} ({flag}): {affected} — {dev.reason}{detail}"
+    return f"- {dev.type.value}: {affected} — {dev.reason}{detail}"
 
 
 __all__ = [
@@ -343,14 +287,11 @@ __all__ = [
     "MAX_SNAPSHOT_TOTAL_BYTES",
     "MOVE_OPEN",
     "detect_marker_collision",
-    "format_step",
-    "is_protected",
     "op_paths",
     "op_written_paths",
-    "parse_step_arg",
     "parse_step_message",
+    "render_hint",
     "render_report",
-    "report_sort_key",
     "summarize_check",
     "summarize_deviation",
     "validate_paths",

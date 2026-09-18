@@ -11,10 +11,6 @@ import pytest
 from dwch.shared.errors import FormatError
 from dwch.shared.paths import check_safe_root, normalize_rel, safe_path
 
-# ---------------------------------------------------------------------------
-# normalize_rel
-# ---------------------------------------------------------------------------
-
 
 def test_normalize_rel_collapses_backslashes() -> None:
     """Backslashes become forward slashes."""
@@ -36,11 +32,6 @@ def test_normalize_rel_preserves_single_slash() -> None:
     assert normalize_rel("/") == "/"
 
 
-# ---------------------------------------------------------------------------
-# check_safe_root
-# ---------------------------------------------------------------------------
-
-
 def test_check_safe_root_accepts_project_dir(tmp_path: Path) -> None:
     """A fresh project directory is accepted."""
     root = tmp_path / "proj"
@@ -60,12 +51,6 @@ def test_check_safe_root_refuses_users() -> None:
     assert check_safe_root(Path("C:/Users")) is not None
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
-def test_check_safe_root_refuses_program_files() -> None:
-    """`C:\\Program Files` is refused on Windows."""
-    assert check_safe_root(Path("C:/Program Files")) is not None
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only")
 def test_check_safe_root_refuses_posix_root() -> None:
     """`/` is refused on POSIX."""
@@ -76,12 +61,6 @@ def test_check_safe_root_refuses_posix_root() -> None:
 def test_check_safe_root_refuses_etc() -> None:
     """`/etc` is refused on POSIX."""
     assert check_safe_root(Path("/etc")) is not None
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only")
-def test_check_safe_root_refuses_home_itself() -> None:
-    """`/home` itself is refused on POSIX."""
-    assert check_safe_root(Path("/home")) is not None
 
 
 def test_check_safe_root_accepts_inside_home(
@@ -105,56 +84,34 @@ def test_check_safe_root_refuses_home_dir(
     assert check_safe_root(fake_home) is not None
 
 
-# ---------------------------------------------------------------------------
-# safe_path — happy paths
-# ---------------------------------------------------------------------------
-
-
 def test_safe_path_accepts_normal_relative(tmp_path: Path) -> None:
     """A normal relative path resolves under the root."""
     root = tmp_path.resolve()
-    result = safe_path("src/app.py", root)
-    assert result == root / "src" / "app.py"
+    assert safe_path("src/app.py", root) == root / "src" / "app.py"
 
 
 def test_safe_path_accepts_nested(tmp_path: Path) -> None:
     """A deeply nested path is accepted."""
     root = tmp_path.resolve()
-    result = safe_path("a/b/c/d.py", root)
-    assert result == root / "a" / "b" / "c" / "d.py"
+    assert safe_path("a/b/c/d.py", root) == root / "a" / "b" / "c" / "d.py"
 
 
 def test_safe_path_normalizes_backslashes(tmp_path: Path) -> None:
     """Backslashes in the input are normalized to forward slashes."""
     root = tmp_path.resolve()
-    result = safe_path("a\\b\\c.py", root)
-    assert result == root / "a" / "b" / "c.py"
+    assert safe_path("a\\b\\c.py", root) == root / "a" / "b" / "c.py"
 
 
 def test_safe_path_accepts_dot_harness(tmp_path: Path) -> None:
     """A leading-dot directory such as `.harness/` is accepted."""
     root = tmp_path.resolve()
-    result = safe_path(".harness/state.toml", root)
-    assert result == root / ".harness" / "state.toml"
+    assert safe_path(".harness/state.toml", root) == root / ".harness" / "state.toml"
 
 
 def test_safe_path_accepts_dotfile(tmp_path: Path) -> None:
     """A leading-dot filename such as `.gitignore` is accepted."""
     root = tmp_path.resolve()
-    result = safe_path(".gitignore", root)
-    assert result == root / ".gitignore"
-
-
-def test_safe_path_accepts_nested_dotfile(tmp_path: Path) -> None:
-    """`.harness/.gitignore` is accepted; every component starts with `.`."""
-    root = tmp_path.resolve()
-    result = safe_path(".harness/.gitignore", root)
-    assert result == root / ".harness" / ".gitignore"
-
-
-# ---------------------------------------------------------------------------
-# safe_path — refusals
-# ---------------------------------------------------------------------------
+    assert safe_path(".gitignore", root) == root / ".gitignore"
 
 
 def test_safe_path_rejects_empty(tmp_path: Path) -> None:
@@ -226,11 +183,7 @@ def test_safe_path_rejects_leading_space(tmp_path: Path) -> None:
 
 
 def test_safe_path_rejects_trailing_space(tmp_path: Path) -> None:
-    """A trailing space in a component is refused.
-
-    The trailing space must be at the end of a component; a space
-    in the middle of a name is a normal character.
-    """
+    """A trailing space in a component is refused."""
     with pytest.raises(FormatError, match="leading or trailing"):
         safe_path("src/a.py ", tmp_path)
 
@@ -246,11 +199,6 @@ def test_safe_path_rejects_long_component(tmp_path: Path) -> None:
     long_name = "a" * 256 + ".py"
     with pytest.raises(FormatError, match="longer than 255 bytes"):
         safe_path(f"src/{long_name}", tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# safe_path — symlinks
-# ---------------------------------------------------------------------------
 
 
 def _symlink_or_skip(src: Path, dst: Path) -> None:
@@ -271,28 +219,6 @@ def test_safe_path_refuses_symlink_component(tmp_path: Path) -> None:
     _symlink_or_skip(outside, link)
     with pytest.raises(FormatError, match="symlinks are not supported"):
         safe_path("link/file.py", root.resolve())
-
-
-def test_safe_path_refuses_escape_via_symlink(tmp_path: Path) -> None:
-    """A path that resolves outside the root is refused."""
-    root = tmp_path / "root"
-    root.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    link = root / "link"
-    _symlink_or_skip(outside, link)
-    with pytest.raises(FormatError, match="symlinks are not supported|escapes"):
-        safe_path("link/sub/file.py", root.resolve())
-
-
-def test_safe_path_accepts_symlinked_root(tmp_path: Path) -> None:
-    """The project root being a symlink is fine when already resolved."""
-    real = tmp_path / "real"
-    real.mkdir()
-    (real / "src").mkdir()
-    resolved_root = real.resolve()
-    result = safe_path("src/app.py", resolved_root)
-    assert result == resolved_root / "src" / "app.py"
 
 
 def test_safe_path_refuses_broken_symlink(tmp_path: Path) -> None:

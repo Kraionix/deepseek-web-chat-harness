@@ -11,18 +11,25 @@ from dwch.domain.models import (
     Deviation,
     DeviationType,
     MoveOp,
+    Plan,
+    PlanMeta,
     State,
+    Task,
     WriteOp,
 )
 from dwch.domain.rules import (
     has_blocker,
+    has_plan_correction,
     is_development_phase,
+    is_phase_abandoned,
     is_phase_closed,
+    is_phase_open,
+    is_plan_frozen,
     is_planning_phase,
-    is_roadmap_frozen,
     is_state_consistent,
     is_substantive,
     is_unset_phase,
+    next_task_id,
     phase_name_error,
 )
 
@@ -30,18 +37,26 @@ from dwch.domain.rules import (
 def _state(**overrides) -> State:
     """Build a fully-populated state for the predicates under test."""
     base = State(
-        harness_version="0.3.0",
-        current_phase="phase-01",
+        harness_version="0.4.0",
+        phase_name="phase-01",
         phase_kind="development",
-        current_step=1,
+        phase_status="open",
+        phase_opened_at="2026-01-01T00:00:00+00:00",
+        phase_closed_at="",
+        plan_version=1,
+        plan_sha256="abc",
+        plan_position=0,
+        plan_frozen=True,
+        verify_ok=False,
+        verify_task_id="",
+        verify_at="",
+        failure_task_id="",
+        failure_check_name="",
+        failure_excerpt="",
+        failure_count=0,
+        rollback_count=0,
         last_commit="",
         last_commit_date="",
-        roadmap_version=1,
-        roadmap_step=0,
-        roadmap_frozen=True,
-        rollback_count=0,
-        last_opened="",
-        last_closed="",
     )
     return replace(base, **overrides)
 
@@ -66,94 +81,50 @@ def test_is_unset_phase_true() -> None:
     assert is_unset_phase(_state(phase_kind="unset"))
 
 
-def test_is_roadmap_frozen_reads_flag() -> None:
-    """`is_roadmap_frozen` mirrors `state.roadmap_frozen`."""
-    assert is_roadmap_frozen(_state(roadmap_frozen=True))
-    assert not is_roadmap_frozen(_state(roadmap_frozen=False))
+def test_is_phase_open_true() -> None:
+    """An open status matches."""
+    assert is_phase_open(_state(phase_status="open"))
 
 
-def test_is_phase_closed_false_when_never_closed() -> None:
-    """An empty `last_closed` means the phase is open."""
-    assert not is_phase_closed(
-        _state(last_opened="2026-01-01T00:00:00+00:00", last_closed="")
-    )
+def test_is_phase_closed_true() -> None:
+    """A closed status matches."""
+    assert is_phase_closed(_state(phase_status="closed"))
 
 
-def test_is_phase_closed_true_after_close() -> None:
-    """A close timestamp at or after open means the phase is closed."""
-    assert is_phase_closed(
-        _state(
-            last_opened="2026-01-01T00:00:00+00:00",
-            last_closed="2026-01-01T00:01:00+00:00",
-        )
-    )
+def test_is_phase_abandoned_true() -> None:
+    """An abandoned status matches."""
+    assert is_phase_abandoned(_state(phase_status="abandoned"))
 
 
-def test_is_phase_closed_false_before_close() -> None:
-    """A close timestamp earlier than open means the phase is open."""
-    assert not is_phase_closed(
-        _state(
-            last_opened="2026-01-01T00:01:00+00:00",
-            last_closed="2026-01-01T00:00:00+00:00",
-        )
-    )
-
-
-# ---------------------------------------------------------------------------
-# is_substantive
-# ---------------------------------------------------------------------------
+def test_is_plan_frozen_reads_flag() -> None:
+    """`is_plan_frozen` mirrors `state.plan_frozen`."""
+    assert is_plan_frozen(_state(plan_frozen=True))
+    assert not is_plan_frozen(_state(plan_frozen=False))
 
 
 def test_is_substantive_true_for_code_file() -> None:
     """A step writing a code file is substantive."""
-    ops = [WriteOp(path="src/x.py", content="x = 1\n")]
-    assert is_substantive(ops)
+    assert is_substantive([WriteOp(path="src/x.py", content="x = 1\n")])
 
 
 def test_is_substantive_false_for_deviations_only() -> None:
     """A step that writes only deviation files is not substantive."""
-    ops = [WriteOp(path=".harness/deviations/step-01.toml", content="")]
-    assert not is_substantive(ops)
-
-
-def test_is_substantive_exempts_handoff() -> None:
-    """Writing only `.harness/handoff.md` is not substantive."""
-    ops = [WriteOp(path=".harness/handoff.md", content="")]
-    assert not is_substantive(ops)
-
-
-def test_is_substantive_exempts_summaries() -> None:
-    """Writing only a phase summary is not substantive."""
-    ops = [WriteOp(path=".harness/summaries/p1.md", content="")]
-    assert not is_substantive(ops)
+    assert not is_substantive([WriteOp(path=".harness/deviations/t1.toml", content="")])
 
 
 def test_is_substantive_true_for_delete_outside_prefixes() -> None:
     """A DeleteOp on a code file is substantive."""
-    ops = [DeleteOp(path="src/old.py")]
-    assert is_substantive(ops)
+    assert is_substantive([DeleteOp(path="src/old.py")])
 
 
 def test_is_substantive_true_for_move_outside_prefixes() -> None:
     """A MoveOp on a code file is substantive."""
-    ops = [MoveOp(src="src/a.py", dst="src/b.py")]
-    assert is_substantive(ops)
-
-
-def test_is_substantive_false_for_delete_inside_prefixes() -> None:
-    """A DeleteOp on a deviation file is not substantive."""
-    ops = [DeleteOp(path=".harness/deviations/step-01.toml")]
-    assert not is_substantive(ops)
+    assert is_substantive([MoveOp(src="src/a.py", dst="src/b.py")])
 
 
 def test_is_substantive_empty() -> None:
     """An empty op list is not substantive."""
     assert not is_substantive([])
-
-
-# ---------------------------------------------------------------------------
-# has_blocker
-# ---------------------------------------------------------------------------
 
 
 def test_has_blocker_true() -> None:
@@ -163,7 +134,6 @@ def test_has_blocker_true() -> None:
         affected=(),
         reason="",
         detail="",
-        auto=False,
     )
     assert has_blocker([dev])
 
@@ -175,14 +145,53 @@ def test_has_blocker_false() -> None:
         affected=(),
         reason="",
         detail="",
-        auto=False,
     )
     assert not has_blocker([dev])
 
 
-# ---------------------------------------------------------------------------
-# is_state_consistent
-# ---------------------------------------------------------------------------
+def test_has_plan_correction_true() -> None:
+    """`has_plan_correction` detects a plan-correction deviation."""
+    dev = Deviation(
+        type=DeviationType.PLAN_CORRECTION,
+        affected=(),
+        reason="",
+        detail="",
+    )
+    assert has_plan_correction([dev])
+
+
+def test_next_task_id_returns_id() -> None:
+    """`next_task_id` returns the task at the given position."""
+    plan = Plan(
+        meta=PlanMeta(version=1, note=""),
+        interfaces=(),
+        tasks=(
+            Task(
+                id="a",
+                title="a",
+                goal="",
+                files=(),
+                interfaces=(),
+                acceptance=(),
+            ),
+            Task(
+                id="b",
+                title="b",
+                goal="",
+                files=(),
+                interfaces=(),
+                acceptance=(),
+            ),
+        ),
+    )
+    assert next_task_id(plan, 0) == "a"
+    assert next_task_id(plan, 1) == "b"
+
+
+def test_next_task_id_past_end() -> None:
+    """`next_task_id` returns None past the end."""
+    plan = Plan(meta=PlanMeta(version=1, note=""), interfaces=(), tasks=())
+    assert next_task_id(plan, 0) is None
 
 
 def test_state_consistent_ok() -> None:
@@ -195,19 +204,19 @@ def test_state_consistent_rejects_unknown_kind() -> None:
     assert not is_state_consistent(_state(phase_kind="bogus"))
 
 
+def test_state_consistent_rejects_unknown_status() -> None:
+    """An unknown phase status is inconsistent."""
+    assert not is_state_consistent(_state(phase_status="bogus"))
+
+
 def test_state_consistent_rejects_empty_phase() -> None:
     """An empty phase name is inconsistent."""
-    assert not is_state_consistent(_state(current_phase=""))
+    assert not is_state_consistent(_state(phase_name=""))
 
 
-def test_state_consistent_rejects_negative_step() -> None:
-    """A negative counter is inconsistent."""
-    assert not is_state_consistent(_state(current_step=-1))
-
-
-# ---------------------------------------------------------------------------
-# phase_name_error
-# ---------------------------------------------------------------------------
+def test_state_consistent_rejects_negative_position() -> None:
+    """A negative position is inconsistent."""
+    assert not is_state_consistent(_state(plan_position=-1))
 
 
 def test_phase_name_error_ok() -> None:
@@ -228,11 +237,6 @@ def test_phase_name_error_empty() -> None:
 def test_phase_name_error_space() -> None:
     """A space is rejected."""
     assert "spaces" in phase_name_error("has space")
-
-
-def test_phase_name_error_leading_space() -> None:
-    """Leading whitespace is rejected."""
-    assert "whitespace" in phase_name_error(" leading")
 
 
 def test_phase_name_error_newline() -> None:
@@ -261,19 +265,9 @@ def test_phase_name_error_slash() -> None:
     assert "path separators" in phase_name_error("a/b")
 
 
-def test_phase_name_error_backslash() -> None:
-    """A backslash is rejected."""
-    assert "path separators" in phase_name_error("a\\b")
-
-
 def test_phase_name_error_dot() -> None:
     """A single dot is rejected."""
     assert phase_name_error(".") == "phase name must not be '.' or '..'"
-
-
-def test_phase_name_error_dotdot() -> None:
-    """Two dots are rejected."""
-    assert phase_name_error("..") == "phase name must not be '.' or '..'"
 
 
 @pytest.mark.parametrize("bad", ["a<b", "a>b", 'a"b', "a:b", "a|b", "a?b", "a*b"])

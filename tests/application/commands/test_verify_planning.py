@@ -6,10 +6,10 @@ from argparse import Namespace
 from pathlib import Path
 
 from dwch.application.commands.apply import cmd_apply
-from dwch.application.commands.new_phase import cmd_new_phase
+from dwch.application.commands.start import cmd_start
 from dwch.application.commands.verify import cmd_verify
 
-_ROADMAP_GOOD = """\
+_PLAN_GOOD = """\
 [meta]
 version = 1
 note = "x"
@@ -21,8 +21,8 @@ module = "src/a.py"
 signature = "class A"
 doc = ""
 
-[[steps]]
-number = 1
+[[tasks]]
+id = "models"
 title = "one"
 goal = ""
 files = ["src/a.py"]
@@ -32,65 +32,47 @@ depends_on = []
 """
 
 
-def _phase(root: Path, deps) -> None:
+def _start(root: Path, deps) -> None:
     """Start a planning phase."""
-    assert cmd_new_phase(Namespace(name="p", kind="planning"), deps) == 0
+    assert cmd_start(Namespace(goal="plan", kind="planning"), deps) == 0
 
 
-def _apply_roadmap(root: Path, deps, body: str, path: str) -> None:
-    """Write a roadmap via `apply` so `verify` sees it on disk."""
+def _apply(root: Path, deps, body: str, path: str) -> None:
+    """Write a plan via `apply` so `verify` sees it on disk."""
     deps.clipboard.text = f"<<<FILE:{path}>>>\n{body}<<<END>>>\n"
-    assert cmd_apply(Namespace(step="01", from_file=None), deps) == 0
+    assert cmd_apply(Namespace(from_file=None), deps) == 0
 
 
-def test_planning_verify_roadmap_ok(harness_root: Path, deps) -> None:
-    """A valid roadmap passes the structure check."""
-    _phase(harness_root, deps)
-    _apply_roadmap(harness_root, deps, _ROADMAP_GOOD, ".harness/roadmap.toml")
-    assert cmd_verify(Namespace(step="01", clipboard=False), deps) == 0
+def test_planning_verify_plan_ok(harness_root: Path, deps) -> None:
+    """A valid plan passes the structure check."""
+    _start(harness_root, deps)
+    _apply(harness_root, deps, _PLAN_GOOD, ".harness/plan.toml")
+    assert cmd_verify(Namespace(clipboard=False), deps) == 0
 
 
-def test_planning_verify_roadmap_bad(harness_root: Path, deps) -> None:
-    """An unknown interface reference fails `roadmap-structure`."""
-    _phase(harness_root, deps)
-    bad = _ROADMAP_GOOD.replace('interfaces = ["A"]', 'interfaces = ["Z"]')
-    _apply_roadmap(harness_root, deps, bad, ".harness/roadmap.toml")
-    assert cmd_verify(Namespace(step="01", clipboard=False), deps) == 1
+def test_planning_verify_plan_bad(harness_root: Path, deps) -> None:
+    """An unknown interface reference fails `plan-structure`."""
+    _start(harness_root, deps)
+    bad = _PLAN_GOOD.replace('interfaces = ["A"]', 'interfaces = ["Z"]')
+    _apply(harness_root, deps, bad, ".harness/plan.toml")
+    assert cmd_verify(Namespace(clipboard=False), deps) == 1
 
 
-def test_planning_verify_double_slash_path(harness_root: Path, deps) -> None:
-    """`.harness//roadmap.toml` is recognized as the roadmap."""
-    _phase(harness_root, deps)
-    _apply_roadmap(harness_root, deps, _ROADMAP_GOOD, ".harness//roadmap.toml")
-    assert cmd_verify(Namespace(step="01", clipboard=False), deps) == 0
+def test_planning_verify_writes_hint_on_failure(harness_root: Path, deps) -> None:
+    """A failed verify places a hint on the clipboard."""
+    _start(harness_root, deps)
+    bad = _PLAN_GOOD.replace('interfaces = ["A"]', 'interfaces = ["Z"]')
+    _apply(harness_root, deps, bad, ".harness/plan.toml")
+    cmd_verify(Namespace(clipboard=False), deps)
+    assert "verify FAILED" in deps.clipboard.text
 
 
-def test_planning_verify_missing_roadmap_section(harness_root: Path, deps) -> None:
-    """A step that does not write a roadmap skips the structure check."""
-    _phase(harness_root, deps)
-    deps.clipboard.text = "<<<FILE:docs/x.md>>>\nhello\n<<<END>>>\n"
-    assert cmd_apply(Namespace(step="01", from_file=None), deps) == 0
-    assert cmd_verify(Namespace(step="01", clipboard=False), deps) == 0
+def test_planning_verify_increments_failure_count(harness_root: Path, deps) -> None:
+    """A failed verify increments `state.failure.count`."""
+    from dwch.application.state import load_state
 
-
-def test_planning_verify_bad_step_argument(harness_root: Path, deps) -> None:
-    """A non-integer step argument exits 2."""
-    _phase(harness_root, deps)
-    assert cmd_verify(Namespace(step="abc", clipboard=False), deps) == 2
-
-
-def test_planning_verify_zero_step_argument(harness_root: Path, deps) -> None:
-    """`verify 0` exits 2."""
-    _phase(harness_root, deps)
-    _apply_roadmap(harness_root, deps, _ROADMAP_GOOD, ".harness/roadmap.toml")
-    assert cmd_verify(Namespace(step="0", clipboard=False), deps) == 2
-
-
-def test_planning_verify_single_digit_step(harness_root: Path, deps) -> None:
-    """`apply 1` + `verify 1` agree on the same step file."""
-    _phase(harness_root, deps)
-    deps.clipboard.text = (
-        "<<<FILE:.harness/roadmap.toml>>>\n" + _ROADMAP_GOOD + "<<<END>>>\n"
-    )
-    assert cmd_apply(Namespace(step="1", from_file=None), deps) == 0
-    assert cmd_verify(Namespace(step="1", clipboard=False), deps) == 0
+    _start(harness_root, deps)
+    bad = _PLAN_GOOD.replace('interfaces = ["A"]', 'interfaces = ["Z"]')
+    _apply(harness_root, deps, bad, ".harness/plan.toml")
+    cmd_verify(Namespace(clipboard=False), deps)
+    assert load_state(deps.fs, harness_root).failure_count == 1

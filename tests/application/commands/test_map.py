@@ -11,18 +11,11 @@ from dwch.application.commands.map import cmd_map
 def _args(
     root: str | None = None,
     full: bool = False,
-    tree: bool = False,
     private: bool = False,
     clipboard: bool = False,
 ) -> Namespace:
     """Minimal namespace for `cmd_map`."""
-    return Namespace(
-        root=root,
-        full=full,
-        tree=tree,
-        private=private,
-        clipboard=clipboard,
-    )
+    return Namespace(root=root, full=full, private=private, clipboard=clipboard)
 
 
 def test_map_no_root(harness_root: Path, deps) -> None:
@@ -36,5 +29,4 @@ def test_map_root_option(harness_root: Path, deps, capsys) -> None:
     src.mkdir()
     (src / "a.py").write_text("x = 1\n", encoding="utf-8")
     assert cmd_map(_args(root="src"), deps) == 0
-    out = capsys.readouterr().out
-    assert "a.py" in out
+    assert "a.py" in capsys.readouterr().out

@@ -29,7 +29,7 @@ class StateError(HarnessError):
 
 
 class FormatError(HarnessError):
-    """A step message or report failed to parse or validate."""
+    """A message failed to parse or validate."""
 
 
 class FilesystemError(HarnessError):
@@ -52,12 +52,8 @@ class TokenizerError(HarnessError):
     """The tokenizer file is missing or could not be loaded."""
 
 
-class RoadmapError(HarnessError):
-    """`.harness/roadmap.toml` is missing, malformed, or inconsistent."""
-
-
-class LockError(HarnessError):
-    """`.harness/roadmap.lock` is missing, malformed, or out of sync."""
+class PlanError(HarnessError):
+    """`.harness/plan.toml` is missing, malformed, or inconsistent."""
 
 
 class DeviationError(HarnessError):
@@ -72,9 +68,8 @@ __all__ = [
     "FormatError",
     "GitError",
     "HarnessError",
-    "LockError",
+    "PlanError",
     "ProcessError",
-    "RoadmapError",
     "StateError",
     "TokenizerError",
 ]

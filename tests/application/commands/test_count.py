@@ -17,8 +17,7 @@ def test_count_file(harness_root: Path, deps, capsys) -> None:
     """A file prints one line with its count."""
     (harness_root / "x.py").write_text("x = 1\n", encoding="utf-8")
     assert cmd_count(_args("x.py"), deps) == 0
-    out = capsys.readouterr().out
-    assert "x.py: " in out
+    assert "x.py: " in capsys.readouterr().out
 
 
 def test_count_missing(harness_root: Path, deps) -> None:
@@ -33,5 +32,4 @@ def test_count_directory(harness_root: Path, deps, capsys) -> None:
     (d / "a.py").write_text("a\n", encoding="utf-8")
     (d / "b.md").write_text("bb\n", encoding="utf-8")
     assert cmd_count(_args("pkg"), deps) == 0
-    out = capsys.readouterr().out
-    assert "TOTAL:" in out
+    assert "TOTAL:" in capsys.readouterr().out

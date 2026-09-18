@@ -15,7 +15,7 @@ _FS = LocalFilesystem()
 
 
 def test_parse_all_types() -> None:
-    """Every declared deviation type parses."""
+    """Every deviation type parses."""
     for dtype in DeviationType:
         body = (
             "[[deviation]]\n"
@@ -23,7 +23,6 @@ def test_parse_all_types() -> None:
             'affected = ["a.py"]\n'
             'reason = "r"\n'
             'detail = ""\n'
-            "auto = false\n"
         )
         parsed = dm.parse(body, Path("x.toml"))
         assert parsed[0].type is dtype
@@ -55,13 +54,6 @@ def test_parse_affected_string_raises() -> None:
         dm.parse(body, Path("x.toml"))
 
 
-def test_parse_auto_string_raises() -> None:
-    """A string `auto = "false"` is rejected, not truthy."""
-    body = '[[deviation]]\ntype = "assumption"\nreason = "r"\nauto = "false"\n'
-    with pytest.raises(DeviationError, match="auto must be a boolean"):
-        dm.parse(body, Path("x.toml"))
-
-
 def test_render_parse_round_trip() -> None:
     """Rendering then parsing preserves a reason with a newline."""
     devs = [
@@ -70,39 +62,51 @@ def test_render_parse_round_trip() -> None:
             affected=("a.py", "b.py"),
             reason="line one\nline two",
             detail="with\ttab",
-            auto=False,
         )
     ]
     rendered = dm.render(devs)
     assert dm.parse(rendered, Path("x.toml")) == devs
 
 
-def test_load_step_missing(tmp_path: Path) -> None:
-    """A missing step file yields an empty list."""
-    assert dm.load_step(_FS, tmp_path, 1) == []
+def test_load_missing(tmp_path: Path) -> None:
+    """A missing task file yields an empty list."""
+    assert dm.load(_FS, tmp_path, "t1") == []
 
 
-def test_load_step_present(tmp_path: Path) -> None:
-    """An existing step file is parsed."""
+def test_load_present(tmp_path: Path) -> None:
+    """An existing task file is parsed."""
     tmp_path.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "step-01.toml").write_text(
+    (tmp_path / "t1.toml").write_text(
         '[[deviation]]\ntype = "assumption"\nreason = "r"\n',
         encoding="utf-8",
     )
-    result = dm.load_step(_FS, tmp_path, 1)
+    result = dm.load(_FS, tmp_path, "t1")
     assert result[0].type is DeviationType.ASSUMPTION
 
 
-def test_load_auto_step_missing(tmp_path: Path) -> None:
-    """A missing auto file yields an empty list."""
-    assert dm.load_auto_step(_FS, tmp_path, 1) == []
+def test_write_creates_file(tmp_path: Path) -> None:
+    """`write` creates `{task_id}.toml`."""
+    dev = Deviation(
+        type=DeviationType.ASSUMPTION,
+        affected=("x.py",),
+        reason="r",
+        detail="",
+    )
+    dm.write(_FS, tmp_path, "t1", [dev])
+    assert (tmp_path / "t1.toml").is_file()
+
+
+def test_write_empty_noop(tmp_path: Path) -> None:
+    """An empty list writes nothing."""
+    dm.write(_FS, tmp_path, "t1", [])
+    assert not (tmp_path / "t1.toml").exists()
 
 
 def test_load_recent_limits(tmp_path: Path) -> None:
     """`load_recent` returns at most `n` files, newest last."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     for i in (1, 2, 3):
-        (tmp_path / f"step-{i:02d}.toml").write_text(
+        (tmp_path / f"t{i}.toml").write_text(
             f'[[deviation]]\ntype = "assumption"\nreason = "{i}"\n',
             encoding="utf-8",
         )
@@ -114,48 +118,16 @@ def test_load_recent_limits(tmp_path: Path) -> None:
 def test_load_recent_zero_returns_empty(tmp_path: Path) -> None:
     """`n == 0` returns an empty list, not the whole set."""
     tmp_path.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "step-01.toml").write_text(
+    (tmp_path / "t1.toml").write_text(
         '[[deviation]]\ntype = "assumption"\nreason = "r"\n',
         encoding="utf-8",
     )
     assert dm.load_recent(_FS, tmp_path, 0) == []
 
 
-def test_load_recent_negative_returns_empty(tmp_path: Path) -> None:
-    """A negative `n` returns an empty list."""
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "step-01.toml").write_text(
-        '[[deviation]]\ntype = "assumption"\nreason = "r"\n',
-        encoding="utf-8",
-    )
-    assert dm.load_recent(_FS, tmp_path, -1) == []
-
-
 def test_load_recent_missing_dir(tmp_path: Path) -> None:
     """A missing directory yields an empty list."""
     assert dm.load_recent(_FS, tmp_path / "nope", 5) == []
-
-
-def test_write_auto_overwrites(tmp_path: Path) -> None:
-    """`write_auto` overwrites an existing file."""
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    dev = Deviation(
-        type=DeviationType.EXTRA_FILE,
-        affected=("x.py",),
-        reason="r",
-        detail="",
-        auto=True,
-    )
-    dm.write_auto(_FS, tmp_path, 1, [dev])
-    dm.write_auto(_FS, tmp_path, 1, [dev])
-    content = (tmp_path / "step-01-auto.toml").read_text(encoding="utf-8")
-    assert "extra-file" in content
-
-
-def test_write_auto_empty_noop(tmp_path: Path) -> None:
-    """An empty list writes nothing."""
-    dm.write_auto(_FS, tmp_path, 1, [])
-    assert not (tmp_path / "step-01-auto.toml").exists()
 
 
 def test_summarize_empty() -> None:
@@ -171,7 +143,6 @@ def test_summarize_zero_returns_placeholder() -> None:
             affected=(),
             reason="r",
             detail="",
-            auto=False,
         )
     ]
     assert "(none)" in dm.summarize(devs, 0)
@@ -185,7 +156,6 @@ def test_summarize_lists_recent() -> None:
             affected=(),
             reason=f"r{i}",
             detail="",
-            auto=False,
         )
         for i in range(3)
     ]

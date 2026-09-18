@@ -1,14 +1,8 @@
 """`dwch init` — install the harness into a project.
 
-Creates `.harness/`, `steps/`, copies the templates, downloads the
+Creates `.harness/`, `steps/`, copies `contract.md`, downloads the
 tokenizer JSON, and writes an initial state file. Refuses to run
 when `.harness/` already exists unless `--force` is given.
-
-`--force` overwrites the files that the harness owns and can
-safely regenerate: the config, the shipped templates, and the
-tokenizer cache. It does not overwrite `state.toml` or
-`.harness/.gitignore`, because those carry session-local state that
-`init` cannot reconstruct.
 """
 
 from __future__ import annotations
@@ -30,15 +24,10 @@ from ..config import config_to_toml
 from ..deps import Deps
 from ..state import initial_state, save_state
 
-_TEMPLATES = (
-    "session-protocol.md",
-    "step-format.md",
-    "report-format.md",
-    "planning-handoff.md",
-    "development-handoff.md",
-    "roadmap-format.md",
-    "deviation-format.md",
-    "toolbox.md",
+_TEMPLATES = ("contract.md",)
+
+_TOKENIZER_URL = (
+    "https://huggingface.co/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer.json"
 )
 
 
@@ -46,11 +35,6 @@ def cmd_init(args: Namespace, deps: Deps) -> int:
     """Install the harness. Returns 0 on success, 2 on error."""
     root = deps.project_root
 
-    # The CLI already checked the root before dispatch. Re-checking
-    # here is deliberate: the failure inside `init` is expensive
-    # (it creates directories and downloads a tokenizer), and a
-    # root that changed between the CLI check and this call must
-    # not slip through.
     refusal = check_safe_root(root)
     if refusal is not None:
         print(f"error: {refusal}", file=sys.stderr)
@@ -82,12 +66,11 @@ def cmd_init(args: Namespace, deps: Deps) -> int:
         return 2
 
     print(f"initialized harness at {harness_dir}")
-    print("next: `dwch health`, then `dwch new-phase NAME --kind planning`")
+    print('next: `dwch health`, then `dwch start "goal"`')
     return 0
 
 
 def _write_harness_gitignore(deps: Deps, harness_dir: Path) -> None:
-    """Ignore the downloaded tokenizer data inside `.harness/`."""
     path = harness_dir / ".gitignore"
     if deps.fs.exists(path):
         return
@@ -98,18 +81,16 @@ def _write_harness_gitignore(deps: Deps, harness_dir: Path) -> None:
 
 
 def _write_steps_gitignore(deps: Deps, steps_dir: Path) -> None:
-    """Mark `steps/` as session-local."""
     path = steps_dir / ".gitignore"
     if deps.fs.exists(path):
         return
     deps.fs.write_text(
         path,
-        "# Session artifacts: step messages, apply logs, reports.\n*\n!.gitignore\n",
+        "# Session artifacts: messages, apply logs, reports.\n*\n!.gitignore\n",
     )
 
 
 def _write_templates(deps: Deps, harness_dir: Path, *, force: bool) -> None:
-    """Copy the shipped templates into `.harness/`."""
     for name in _TEMPLATES:
         target = harness_dir / name
         if deps.fs.exists(target) and not force:
@@ -125,7 +106,6 @@ def _write_templates(deps: Deps, harness_dir: Path, *, force: bool) -> None:
 def _write_config(
     deps: Deps, harness_dir: Path, project_name: str, *, force: bool
 ) -> None:
-    """Write `.harness/config.toml`."""
     path = harness_dir / "config.toml"
     if deps.fs.exists(path) and not force:
         return
@@ -133,7 +113,6 @@ def _write_config(
 
 
 def _write_state(deps: Deps, root: Path) -> None:
-    """Write `state.toml` if absent; leave an existing one alone."""
     path = root / ".harness" / "state.toml"
     if deps.fs.exists(path):
         return
@@ -141,17 +120,15 @@ def _write_state(deps: Deps, root: Path) -> None:
 
 
 def _download_tokenizer(deps: Deps, data_dir: Path, *, force: bool) -> None:
-    """Download the DeepSeek tokenizer JSON if it is not cached."""
     target = data_dir / "deepseek_tokenizer.json"
     if deps.fs.exists(target):
         if not force:
             return
         deps.fs.unlink(target)
-    url = "https://huggingface.co/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer.json"
-    print(f"downloading tokenizer from {url}")
+    print(f"downloading tokenizer from {_TOKENIZER_URL}")
     request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "deepseek-web-chat-harness/0.3.3"},
+        _TOKENIZER_URL,
+        headers={"User-Agent": "deepseek-web-chat-harness/0.4.0"},
     )
     try:
         with urllib.request.urlopen(request, timeout=60) as response:

@@ -3,12 +3,7 @@
 Only three ports get fakes: clipboard, process, and tokenizer. The
 filesystem and git ports are used through their real adapters on
 `tmp_path`, because the tests need real file I/O and real git
-semantics (`rollback` uses `git reset --hard`).
-
-`RenameFails` subclasses `LocalFilesystem` rather than implementing
-the port from scratch: it exercises the real adapter and only
-overrides the one method that must fail for the atomicity test.
-`CommitFails` does the same for `CliGit`.
+semantics.
 """
 
 from __future__ import annotations
@@ -22,11 +17,7 @@ from dwch.shared.errors import FilesystemError, GitError
 
 
 class InMemoryClipboard:
-    """Clipboard whose contents live in an attribute.
-
-    `text` starts empty. `read()` returns it; `write()` stores the
-    argument and returns True. Tests set `clipboard.text = "..."`.
-    """
+    """Clipboard whose contents live in an attribute."""
 
     def __init__(self) -> None:
         self.text = ""
@@ -75,12 +66,7 @@ class InMemoryProcess:
 
 
 class InMemoryCounter:
-    """Tokenizer stand-in that counts characters, not BPE tokens.
-
-    Exact token counts do not matter for behaviour tests; ordering
-    and relative sizes do. Using `len` keeps the fake deterministic
-    and fast, and it never needs a tokenizer file on disk.
-    """
+    """Tokenizer stand-in that counts characters, not BPE tokens."""
 
     def count(self, text: str) -> int:
         """Return the character length of `text`."""
@@ -92,12 +78,7 @@ class InMemoryCounter:
 
 
 class RenameFails(LocalFilesystem):
-    """`LocalFilesystem` whose `rename` always raises.
-
-    Used to prove that `save_state` writes a temp file and only then
-    renames: if the rename fails, the original file must be
-    unchanged.
-    """
+    """`LocalFilesystem` whose `rename` always raises."""
 
     def rename(self, src: Path, dst: Path) -> None:
         """Refuse every rename, with a message naming both paths."""
@@ -105,13 +86,7 @@ class RenameFails(LocalFilesystem):
 
 
 class CommitFails(CliGit):
-    """`CliGit` whose `commit_all` always raises.
-
-    Used to prove that `verify`, `close`, and `new-phase` restore
-    state when the lifecycle commit fails. Every other method is the
-    real implementation, so reads (is_clean, status_short, try_head)
-    behave as they do in production.
-    """
+    """`CliGit` whose `commit_all` always raises."""
 
     def commit_all(self, cwd: Path, message: str) -> str:
         """Refuse every commit, with a message naming the subject."""
