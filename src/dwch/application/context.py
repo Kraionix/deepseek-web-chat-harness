@@ -12,13 +12,17 @@ commits). A development session receives the frozen architecture,
 the current step, the interfaces, the roadmap summary, and the
 deviations summary. When the roadmap is exhausted, the
 `current_step` section is replaced by `roadmap_complete`.
+
+Cross-phase continuity comes from `state.summary_phase`: the
+bootstrap shows `.harness/summaries/{summary_phase}.md` as
+`previous_summary`. That summary is the only artifact carried from
+the previous phase's chat.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from importlib.resources import files
-from pathlib import Path
 
 from ..domain.models import BootstrapResult, Config, Roadmap, State
 from ..domain.rules import is_development_phase
@@ -32,12 +36,16 @@ from .token_counter import count_sections
 # exceeds `max_tokens`. Anything not listed here is mandatory.
 # Sections that only appear in one phase kind are naturally
 # skipped when they are absent from the dict.
+#
+# `previous_summary` drops last: cross-phase intent is more
+# important than any within-phase fact.
 _TRUNCATION_PRIORITY = (
-    "deviations_summary",
     "recent_reports",
     "module_map",
     "commits",
     "roadmap_summary",
+    "deviations_summary",
+    "previous_summary",
 )
 
 
@@ -87,7 +95,9 @@ def _collect_sections(
     Planning and development phases get different section sets. In
     a planning phase there is no roadmap and no code yet, so the
     roadmap, module-map, recent-reports, and commits sections would
-    only add noise.
+    only add noise. `previous_summary` appears in both kinds: the
+    phase's starting point is relevant whether the phase plans or
+    codes.
     """
     is_development = is_development_phase(state)
     roadmap_complete = (
@@ -99,6 +109,11 @@ def _collect_sections(
     sections: dict[str, str] = {}
     sections["header"] = _header(deps, config, state)
     sections["protocol"] = _read_template(deps, "session-protocol.md")
+
+    previous = _previous_summary(deps, state)
+    if previous is not None:
+        sections["previous_summary"] = previous
+
     sections["task"] = _task(deps)
     sections["essential"] = _essential(deps, config)
 
@@ -118,7 +133,7 @@ def _collect_sections(
     sections["progress"] = _progress(state)
 
     if is_development:
-        sections["recent_reports"] = _recent_reports(deps, config)
+        sections["recent_reports"] = _current_phase_reports(deps, config, state)
         sections["module_map"] = _module_map(deps, config)
         sections["commits"] = _recent_commits(deps)
 
@@ -158,6 +173,23 @@ def _header(deps: Deps, config: Config, state: State) -> str:
         f"- Git HEAD: `{head}`\n"
         f"- Generated: {now}\n"
     )
+
+
+def _previous_summary(deps: Deps, state: State) -> str | None:
+    """Render the previous phase's summary, or None when there is none.
+
+    `state.summary_phase` is empty until the first `close`. When it
+    names a phase whose file is missing, that is reported explicitly
+    rather than silently omitted: the next session must know that
+    its cross-phase context is incomplete.
+    """
+    if not state.summary_phase:
+        return None
+    path = deps.project_root / ".harness" / "summaries" / f"{state.summary_phase}.md"
+    if not deps.fs.exists(path):
+        return f"## Previous summary ({state.summary_phase})\n\n(missing)"
+    body = deps.fs.read_text(path).rstrip()
+    return f"## Previous summary ({state.summary_phase})\n\n{body}"
 
 
 def _task(deps: Deps) -> str:
@@ -240,21 +272,25 @@ def _progress(state: State) -> str:
     )
 
 
-def _recent_reports(deps: Deps, config: Config) -> str:
-    n = int(config.bootstrap.get("recent_reports", 1))
-    steps_root = deps.project_root / config.paths.get("steps", "steps")
-    if not deps.fs.is_dir(steps_root):
+def _current_phase_reports(deps: Deps, config: Config, state: State) -> str:
+    """Render the most recent reports written in the current phase.
+
+    Scoped to `steps/{state.current_phase}/`. Reports from earlier
+    phases are not shown: their intent lives in the previous phase's
+    summary, and their details are not relevant to the current step.
+    """
+    n = int(config.bootstrap.get("reports_current_phase", 1))
+    steps_dir = (
+        deps.project_root / config.paths.get("steps", "steps") / state.current_phase
+    )
+    if not deps.fs.is_dir(steps_dir):
         return "## Recent reports\n\n(none)"
-    reports: list[Path] = []
-    for phase_dir in sorted(deps.fs.listdir(steps_root)):
-        if not deps.fs.is_dir(phase_dir):
-            continue
-        reports.extend(sorted(deps.fs.glob(phase_dir, "report-*.txt")))
+    reports = sorted(deps.fs.glob(steps_dir, "report-*.txt"))
     if not reports:
         return "## Recent reports\n\n(none)"
     parts = ["## Recent reports"]
     for path in reports[-n:]:
-        parts.append(f"\n### {path.parent.name}/{path.name}\n")
+        parts.append(f"\n### {path.name}\n")
         parts.append(deps.fs.read_text(path).rstrip())
     return "\n".join(parts)
 

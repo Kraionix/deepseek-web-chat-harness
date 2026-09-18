@@ -73,6 +73,32 @@ Every report has the same sections: apply log, verify commands with
 full output and exit codes, commit hash, roadmap position (in
 development), deviations, notes, question.
 
+## Phase transitions
+
+Every phase runs in its own chat. Do not reuse a chat across phases.
+
+Before `dwch close`:
+
+1. The user asks the AI to write a closing summary for the phase.
+2. The AI emits exactly one block:
+   `<<<FILE:.harness/summaries/{phase}.md>>> ... <<<END>>>`.
+3. The user runs `dwch apply summary`.
+4. The user runs `dwch close`.
+
+`dwch close` refuses to run without a summary. This is deliberate:
+the summary is the only cross-phase context the next session sees.
+
+After `dwch close`:
+
+1. Close this chat.
+2. Run `dwch new-phase NAME --kind KIND`.
+3. Run `dwch bootstrap --clipboard`.
+4. Open a fresh chat and paste the bootstrap.
+
+The summary is written for the next AI, not for the current user.
+Keep it short. Say what the phase did, what it deviated from, and
+what the next phase should know. Do not repeat the roadmap.
+
 ## Ending the session
 
 When a phase is complete, the user runs `dwch close`. In a planning

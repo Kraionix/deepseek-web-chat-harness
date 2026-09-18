@@ -22,6 +22,15 @@ _VALID_PHASE_KINDS = frozenset(
     }
 )
 
+# Meta-artifacts do not count as real work when deciding whether a
+# step advances the roadmap. Handoffs and summaries are written by
+# the AI, but they are process files, not deliverables.
+_NON_SUBSTANTIVE_PREFIXES = (
+    ".harness/deviations/",
+    ".harness/summaries/",
+)
+_NON_SUBSTANTIVE_EXACT = (".harness/handoff.md",)
+
 
 def is_planning_phase(state: State) -> bool:
     """True when `state` belongs to a planning phase.
@@ -60,16 +69,33 @@ def is_roadmap_frozen(state: State) -> bool:
     return state.roadmap_frozen
 
 
-def is_substantive(specs: list[FileSpec]) -> bool:
-    """True when at least one spec is not a deviation file.
+def is_phase_closed(state: State) -> bool:
+    """True when the current phase has already been closed.
 
-    A step that writes only `.harness/deviations/...` is a blocker
-    or a declarative note; it does not advance `roadmap_step`.
+    A phase is closed when `last_closed` is set and is not older
+    than `last_opened`. Both timestamps use the same ISO format, so
+    a lexicographic comparison is equivalent to a chronological one.
+    """
+    if not state.last_closed:
+        return False
+    return state.last_closed >= state.last_opened
+
+
+def is_substantive(specs: list[FileSpec]) -> bool:
+    """True when at least one spec is real work, not a meta-artifact.
+
+    Deviation files, phase summaries, and handoff rewrites are
+    process artifacts. A step that touches only those does not
+    advance `roadmap_step`: it reports, blocks, or reorganizes, but
+    it does not deliver.
     """
     for spec in specs:
         path = spec.path.replace("\\", "/")
-        if not path.startswith(".harness/deviations/"):
-            return True
+        if path in _NON_SUBSTANTIVE_EXACT:
+            continue
+        if path.startswith(_NON_SUBSTANTIVE_PREFIXES):
+            continue
+        return True
     return False
 
 
@@ -99,6 +125,7 @@ def is_state_consistent(state: State) -> bool:
 __all__ = [
     "has_blocker",
     "is_development_phase",
+    "is_phase_closed",
     "is_planning_phase",
     "is_roadmap_frozen",
     "is_state_consistent",

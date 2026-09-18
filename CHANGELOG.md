@@ -3,6 +3,65 @@
 Follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-18
+
+### Added
+
+- Phase summaries. Each phase ends with a file at
+  `.harness/summaries/{phase}.md` written by the AI. The next
+  phase's bootstrap shows the most recent summary as the only
+  cross-phase context.
+- `dwch apply summary`, a second form of the existing `apply` that
+  writes the phase summary from a single file block.
+- `bootstrap.previous_summary`, a new section rendering the summary
+  named by `state.summary_phase`. It appears in both planning and
+  development bootstraps.
+- `handoff.ensure_metadata`, which guarantees the
+  `harness:begin` block is present and current. It inserts the
+  block at the top when the markers are missing, and replaces it
+  in place when they are present.
+- `health` reports the summary state on a non-critical line.
+- `rules.is_phase_closed`, a pure predicate over `State` shared by
+  `close` and `new-phase`.
+
+### Changed
+
+- **Breaking:** `state.toml` gains a `[summary]` section with
+  `phase` and `written_at`. `State` gains `summary_phase` and
+  `summary_written_at`. `load_state` rejects a file whose
+  `[harness].version` does not match.
+- **Breaking:** `config.toml` requires
+  `[harness].version = "0.3.0"`. `bootstrap.recent_reports` is
+  replaced by `bootstrap.reports_current_phase`, scoped to the
+  current phase.
+- **Breaking:** `close` requires a summary for the current phase
+  and refuses to run twice on the same phase.
+- **Breaking:** `new-phase` refuses to run while the previous
+  phase is open, and refuses to reuse an existing phase name.
+- **Breaking:** `is_substantive` exempts `.harness/handoff.md` and
+  `.harness/summaries/` in addition to `.harness/deviations/`. A
+  step that only rewrites the handoff or the summary does not
+  advance `roadmap_step`.
+- The bootstrap's `recent_reports` section is now scoped to the
+  current phase. Cross-phase reports are no longer shown; the
+  previous phase's summary carries the cross-phase context
+  instead.
+- `_TRUNCATION_PRIORITY` drops `previous_summary` last, after
+  `recent_reports`, `module_map`, `commits`, `roadmap_summary`,
+  and `deviations_summary`. Cross-phase intent is more important
+  than any within-phase fact.
+- Handoff templates lose the `## Next` section and gain an HTML
+  comment above `harness:begin` explaining the block's ownership.
+- `session-protocol.md` gains a "Phase transitions" section.
+- `toolbox.md` gains a row for `dwch apply summary`.
+
+### Removed
+
+- Config key `bootstrap.recent_reports`. Use
+  `bootstrap.reports_current_phase`.
+- Template section `## Next` from both handoff templates.
+- `handoff.update_metadata`; replaced by `handoff.ensure_metadata`.
+
 ## [0.2.3] - 2026-09-17
 
 ### Added

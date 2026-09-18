@@ -5,6 +5,8 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
+from dwch.application.commands.apply import cmd_apply
+from dwch.application.commands.close import cmd_close
 from dwch.application.commands.new_phase import cmd_new_phase
 from dwch.application.state import load_state
 
@@ -12,6 +14,14 @@ from dwch.application.state import load_state
 def _args(name: str = "p1", kind: str = "planning") -> Namespace:
     """Minimal namespace for `cmd_new_phase`."""
     return Namespace(name=name, kind=kind)
+
+
+def _apply_summary(deps, phase: str) -> None:
+    """Write a phase summary via `apply summary`."""
+    deps.clipboard.text = (
+        f"<<<FILE:.harness/summaries/{phase}.md>>>\nsummary\n<<<END>>>\n"
+    )
+    assert cmd_apply(Namespace(step="summary", from_file=None), deps) == 0
 
 
 def test_new_planning_phase(harness_root: Path, deps) -> None:
@@ -47,3 +57,20 @@ def test_new_phase_dirty_tree(harness_root: Path, deps) -> None:
     deps.git.commit_all(harness_root, "harness setup")
     (harness_root / "README.md").write_text("changed\n", encoding="utf-8")
     assert cmd_new_phase(_args("p1", "planning"), deps) == 2
+
+
+def test_new_phase_requires_previous_closed(harness_root: Path, deps, capsys) -> None:
+    """A new phase is refused while the previous one is still open."""
+    assert cmd_new_phase(_args("p1", "planning"), deps) == 0
+    assert cmd_new_phase(_args("p2", "planning"), deps) == 2
+    assert "not closed" in capsys.readouterr().err
+
+
+def test_new_phase_rejects_existing_name(harness_root: Path, deps, capsys) -> None:
+    """A phase name already on disk is refused."""
+    assert cmd_new_phase(_args("p1", "planning"), deps) == 0
+    _apply_summary(deps, "p1")
+    assert cmd_close(Namespace(tag=False, freeze=False), deps) == 0
+    # `steps/p1/` now exists; reusing the name is refused.
+    assert cmd_new_phase(_args("p1", "planning"), deps) == 2
+    assert "already exists" in capsys.readouterr().err

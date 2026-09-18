@@ -16,6 +16,14 @@ session produces a machine-readable roadmap, `close --freeze` locks
 it, and a development session executes it step by step, recording
 every deviation.
 
+Development is split into **phases**, and every phase runs in its
+own chat. At the end of a phase the AI writes a short summary to
+`.harness/summaries/{phase}.md` via `dwch apply summary`. The next
+phase's bootstrap shows that summary as `previous_summary` — the
+only cross-phase context the new session receives. `dwch close`
+refuses to run without a summary, and `dwch new-phase` refuses to
+run while the previous phase is still open.
+
 ## Requirements
 
 - Python 3.11 or newer (uses `tomllib` and `StrEnum`).
@@ -62,9 +70,10 @@ dwch bootstrap --clipboard
 
 Then open a fresh web chat, paste the bootstrap, and let the model
 produce design artifacts and a roadmap. When the planning phase is
-done:
+done, ask the AI for a closing summary, then:
 
 ```
+dwch apply summary
 dwch close --freeze
 ```
 
@@ -85,6 +94,15 @@ dwch verify 01
 `verify` commits the step, updates state, and writes the report to
 `steps/{phase}/report-01.txt`. Paste that report back into the chat.
 
+When the phase ends:
+
+```
+dwch apply summary
+dwch close
+```
+
+Close the chat, start the next phase, paste a fresh bootstrap.
+
 ## What `init` creates
 
 - `.harness/config.toml` — user-editable configuration.
@@ -103,6 +121,7 @@ its artifacts. The tokenizer file is local cache.
 
 `.harness/roadmap.toml` appears only after a planning phase writes
 it. `.harness/roadmap.lock` appears only after `close --freeze`.
+`.harness/summaries/` appears after the first `apply summary`.
 
 ## The eleven commands
 
@@ -112,32 +131,43 @@ it. `.harness/roadmap.lock` appears only after `close --freeze`.
 | `dwch health` | Check environment and project state. |
 | `dwch bootstrap` | Build the opening message for a new chat. |
 | `dwch apply NN` | Parse a step message and write its files. |
+| `dwch apply summary` | Write the current phase's summary. |
 | `dwch verify NN` | Run checks, commit, produce the report. |
-| `dwch close` | Finalize the session, optionally freeze the roadmap. |
+| `dwch close` | Finalize the phase, optionally freeze the roadmap. |
 | `dwch read PATH` | Wrap a file in step markers for the chat. |
 | `dwch map` | Print the module interface map. |
 | `dwch rollback` | Undo the last step. |
 | `dwch new-phase NAME` | Start a new phase (planning or development). |
 | `dwch count PATH` | Count tokens in a file or tree. |
 
+`apply` is one command with two forms. `apply NN` writes a step's
+files; `apply summary` writes the phase summary. Both accept
+`--from-file`.
+
 ## Lifecycle
 
 1. `init` writes the harness into `.harness/` and `steps/`.
 2. `new-phase NAME --kind planning` starts a planning phase.
 3. Each planning step: `apply` writes files, `verify` checks.
-4. `close --freeze` validates the roadmap, writes
+4. `apply summary` writes the phase summary.
+5. `close --freeze` validates the roadmap, writes
    `.harness/roadmap.lock`, marks state frozen, and commits.
-5. `new-phase NAME --kind development` starts a development phase.
-6. Each development step: `apply` writes files, `verify` runs the
+6. `new-phase NAME --kind development` starts a development phase.
+7. Each development step: `apply` writes files, `verify` runs the
    built-in roadmap checks and commits on success.
-7. `close` finalizes the development phase.
-8. A new architect session can produce a new roadmap version; the
-   old one remains in git history.
+8. `apply summary` writes the phase summary.
+9. `close` finalizes the development phase.
+10. A new architect session can produce a new roadmap version; the
+    old one remains in git history.
 
 ## Step message format
 
-The AI's reply for one step is one or more blocks of the form:
+The AI's reply for one step is one or more blocks of the form
+&lt;&lt;&lt;FILE:relative/path.py&gt;&gt;&gt;, with the file content
+verbatim, closed by a line containing only
+&lt;&lt;&lt;END&gt;&gt;&gt;.
 
-```
-<<<FILE:relative/path.py>>>
-<content verbatim>
+The AI's reply for a phase summary is exactly one block:
+&lt;&lt;&lt;FILE:.harness/summaries/{phase}.md&gt;&gt;&gt;, with the
+summary text, closed by a line containing only
+&lt;&lt;&lt;END&gt;&gt;&gt;.

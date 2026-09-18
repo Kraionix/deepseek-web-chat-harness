@@ -1,5 +1,9 @@
 # Planning — phase {{phase}}
 
+<!-- The block between harness:begin and harness:end is owned by the
+     harness. Do not edit it; it is rewritten on every close and
+     new-phase. Everything outside the block is yours. -->
+
 <!-- harness:begin -->
 phase: unset
 kind: planning
@@ -44,7 +48,3 @@ Optionally: interface stubs in `src/` if they help the coder.
 ## Open questions
 
 - ...
-
-## Next
-
-First step of the planning phase.

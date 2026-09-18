@@ -95,13 +95,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Copy the message to the clipboard instead of printing.",
     )
 
-    p_apply = sub.add_parser("apply", help="Parse and write a step.")
-    p_apply.add_argument("step", help="Two-digit step number.")
+    p_apply = sub.add_parser(
+        "apply",
+        help=(
+            "Parse and write a step, or `apply summary` to write "
+            "the current phase's summary."
+        ),
+    )
+    p_apply.add_argument(
+        "step",
+        help="Two-digit step number, or `summary` to write the phase summary.",
+    )
     p_apply.add_argument(
         "--from-file",
         default=None,
         help=(
-            "Read the step message from a file instead of the clipboard. "
+            "Read the message from a file instead of the clipboard. "
             "Relative paths are resolved against the project root."
         ),
     )

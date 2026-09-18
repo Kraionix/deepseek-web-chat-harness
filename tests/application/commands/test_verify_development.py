@@ -1,4 +1,9 @@
-"""Tests for `application.commands.verify` in a development phase."""
+"""Tests for `application.commands.verify` in a development phase.
+
+Updated for 0.3.0: the planning phase that produces the frozen
+roadmap now closes with a summary, so `_plan_and_freeze` writes one
+before calling `close --freeze`.
+"""
 
 from __future__ import annotations
 
@@ -47,6 +52,13 @@ def _plan_and_freeze(root: Path, deps) -> None:
     arch = root / "docs" / "architecture.md"
     arch.parent.mkdir(parents=True, exist_ok=True)
     arch.write_text("Architecture\n", encoding="utf-8")
+
+    # 0.3.0: close requires a summary.
+    deps.clipboard.text = (
+        "<<<FILE:.harness/summaries/plan.md>>>\nplanning done\n<<<END>>>\n"
+    )
+    assert cmd_apply(Namespace(step="summary", from_file=None), deps) == 0
+
     assert cmd_close(Namespace(tag=False, freeze=True), deps) == 0
     assert cmd_new_phase(Namespace(name="dev", kind="development"), deps) == 0
 

@@ -23,9 +23,34 @@ def test_default_config_loads(tmp_path: Path) -> None:
     _write(tmp_path, config_to_toml("p"))
     cfg = load_config(LocalFilesystem(), tmp_path)
     assert cfg.project_name == "p"
-    assert cfg.harness_version == "0.2.0"
+    assert cfg.harness_version == "0.3.0"
     assert cfg.paths["steps"] == "steps"
     assert cfg.roadmap["path"] == ".harness/roadmap.toml"
+
+
+def test_config_format_version_is_0_3_0(tmp_path: Path) -> None:
+    """The rendered config carries the 0.3.0 format version."""
+    _write(tmp_path, config_to_toml("p"))
+    cfg = load_config(LocalFilesystem(), tmp_path)
+    assert cfg.harness_version == "0.3.0"
+
+
+def test_bootstrap_reports_current_phase_default(tmp_path: Path) -> None:
+    """The default config has `reports_current_phase = 1`."""
+    _write(tmp_path, config_to_toml("p"))
+    cfg = load_config(LocalFilesystem(), tmp_path)
+    assert cfg.bootstrap["reports_current_phase"] == 1
+
+
+def test_bootstrap_reports_current_phase_override(tmp_path: Path) -> None:
+    """An explicit `reports_current_phase` value is honored."""
+    body = config_to_toml("p").replace(
+        "reports_current_phase = 1",
+        "reports_current_phase = 5",
+    )
+    _write(tmp_path, body)
+    cfg = load_config(LocalFilesystem(), tmp_path)
+    assert cfg.bootstrap["reports_current_phase"] == 5
 
 
 def test_missing_config(tmp_path: Path) -> None:
@@ -43,7 +68,7 @@ def test_invalid_toml(tmp_path: Path) -> None:
 
 def test_version_mismatch(tmp_path: Path) -> None:
     """A config with a different format version is rejected."""
-    body = config_to_toml("p").replace('version = "0.2.0"', 'version = "9.9.9"')
+    body = config_to_toml("p").replace('version = "0.3.0"', 'version = "9.9.9"')
     _write(tmp_path, body)
     with pytest.raises(ConfigError, match="does not match"):
         load_config(LocalFilesystem(), tmp_path)

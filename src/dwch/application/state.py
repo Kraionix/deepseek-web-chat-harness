@@ -20,7 +20,19 @@ from .ports import FilesystemPort
 # Version of the state file format. Independent of the package
 # version: a patch release that does not change the format keeps
 # this value, and existing `.harness/state.toml` files keep working.
-_STATE_FORMAT_VERSION = "0.2.0"
+#
+# 0.3.0 adds a `[summary]` section and rejects any file whose
+# `[harness].version` does not match. Backward compatibility is not
+# preserved.
+_STATE_FORMAT_VERSION = "0.3.0"
+
+# Invariant: every timestamp the harness records uses microsecond
+# precision. `is_phase_closed` compares `last_closed` and
+# `last_opened` as strings, so two lifecycle events landing in the
+# same wall-clock second must still be distinguishable. Second
+# resolution is not enough: `close` followed immediately by
+# `new-phase` collides.
+_TIMESTAMP_TIMESPEC = "microseconds"
 
 
 def load_state(fs: FilesystemPort, project_root: Path) -> State:
@@ -30,7 +42,8 @@ def load_state(fs: FilesystemPort, project_root: Path) -> State:
           initialized.
     Post: returns a `State` with every field populated. Missing
           optional sections fall back to defaults.
-    Raises: `StateError` on missing file or malformed content.
+    Raises: `StateError` on missing file, malformed content, or a
+          file written by an incompatible harness version.
     """
     path = _state_path(project_root)
     if not fs.exists(path):
@@ -40,16 +53,24 @@ def load_state(fs: FilesystemPort, project_root: Path) -> State:
     except tomllib.TOMLDecodeError as exc:
         raise StateError(f"invalid TOML in {path}: {exc}") from exc
 
+    harness = data.get("harness", {})
+    version = str(harness.get("version", ""))
+    if version != _STATE_FORMAT_VERSION:
+        raise StateError(
+            f"state version {version!r} does not match harness "
+            f"version {_STATE_FORMAT_VERSION!r}. Run `dwch init --force` "
+            "or delete `.harness/state.toml` and re-initialize."
+        )
+
     phase = data.get("phase", {})
     step = data.get("step", {})
     roadmap = data.get("roadmap", {})
     rollback = data.get("rollback", {})
     session = data.get("session", {})
+    summary = data.get("summary", {})
 
     return State(
-        harness_version=str(
-            data.get("harness", {}).get("version", _STATE_FORMAT_VERSION)
-        ),
+        harness_version=version,
         current_phase=str(phase.get("current", "unset")),
         phase_kind=str(phase.get("kind", "unset")),
         current_step=int(step.get("current", 0)),
@@ -61,6 +82,8 @@ def load_state(fs: FilesystemPort, project_root: Path) -> State:
         rollback_count=int(rollback.get("count", 0)),
         last_opened=str(session.get("last_opened", "")),
         last_closed=str(session.get("last_closed", "")),
+        summary_phase=str(summary.get("phase", "")),
+        summary_written_at=str(summary.get("written_at", "")),
     )
 
 
@@ -86,7 +109,7 @@ def save_state(fs: FilesystemPort, project_root: Path, state: State) -> None:
 
 def initial_state() -> State:
     """Return a fresh `State` for a newly-initialized project."""
-    now = datetime.now(UTC).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec=_TIMESTAMP_TIMESPEC)
     return State(
         harness_version=_STATE_FORMAT_VERSION,
         current_phase="unset",
@@ -100,6 +123,8 @@ def initial_state() -> State:
         rollback_count=0,
         last_opened=now,
         last_closed="",
+        summary_phase="",
+        summary_written_at="",
     )
 
 
@@ -170,6 +195,10 @@ def _render_state(state: State) -> str:
         "[session]",
         f'last_opened = "{state.last_opened}"',
         f'last_closed = "{state.last_closed}"',
+        "",
+        "[summary]",
+        f'phase = "{state.summary_phase}"',
+        f'written_at = "{state.summary_written_at}"',
         "",
     ]
     return "\n".join(lines)

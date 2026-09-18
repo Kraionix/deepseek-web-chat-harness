@@ -13,6 +13,7 @@ from dwch.domain.models import (
 from dwch.domain.rules import (
     has_blocker,
     is_development_phase,
+    is_phase_closed,
     is_planning_phase,
     is_roadmap_frozen,
     is_state_consistent,
@@ -24,7 +25,7 @@ from dwch.domain.rules import (
 def _state(**overrides) -> State:
     """Build a fully-populated state for the predicates under test."""
     base = State(
-        harness_version="0.2.0",
+        harness_version="0.3.0",
         current_phase="phase-01",
         phase_kind="development",
         current_step=1,
@@ -66,6 +67,33 @@ def test_is_roadmap_frozen_reads_flag() -> None:
     assert not is_roadmap_frozen(_state(roadmap_frozen=False))
 
 
+def test_is_phase_closed_false_when_never_closed() -> None:
+    """An empty `last_closed` means the phase is open."""
+    assert not is_phase_closed(
+        _state(last_opened="2026-01-01T00:00:00+00:00", last_closed="")
+    )
+
+
+def test_is_phase_closed_true_after_close() -> None:
+    """A close timestamp at or after open means the phase is closed."""
+    assert is_phase_closed(
+        _state(
+            last_opened="2026-01-01T00:00:00+00:00",
+            last_closed="2026-01-01T00:01:00+00:00",
+        )
+    )
+
+
+def test_is_phase_closed_false_before_close() -> None:
+    """A close timestamp earlier than open means the phase is open."""
+    assert not is_phase_closed(
+        _state(
+            last_opened="2026-01-01T00:01:00+00:00",
+            last_closed="2026-01-01T00:00:00+00:00",
+        )
+    )
+
+
 def test_is_substantive_true_for_code_file() -> None:
     """A step writing a code file is substantive."""
     specs = [FileSpec(path="src/x.py", content="x = 1\n")]
@@ -75,6 +103,18 @@ def test_is_substantive_true_for_code_file() -> None:
 def test_is_substantive_false_for_deviations_only() -> None:
     """A step that writes only deviation files is not substantive."""
     specs = [FileSpec(path=".harness/deviations/step-01.toml", content="")]
+    assert not is_substantive(specs)
+
+
+def test_is_substantive_exempts_handoff() -> None:
+    """Writing only `.harness/handoff.md` is not substantive."""
+    specs = [FileSpec(path=".harness/handoff.md", content="")]
+    assert not is_substantive(specs)
+
+
+def test_is_substantive_exempts_summaries() -> None:
+    """Writing only a phase summary is not substantive."""
+    specs = [FileSpec(path=".harness/summaries/p1.md", content="")]
     assert not is_substantive(specs)
 
 

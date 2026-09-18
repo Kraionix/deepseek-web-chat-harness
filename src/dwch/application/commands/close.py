@@ -1,15 +1,25 @@
-"""`dwch close` — finalize the session.
+"""`dwch close` — finalize a phase.
 
-Updates `.harness/state.toml` (last_closed, last_commit), refreshes
-the metadata block in `handoff.md`, commits both, and optionally
-creates a `session-YYYYMMDD-HHMM` tag. Refuses to run when tracked
-files have uncommitted changes; untracked files are swept into the
-close commit, because the close transition is a bookkeeping commit
-that owns the whole tree.
+A close is a lifecycle transition. It:
 
-With `--freeze`, additionally computes hashes of the roadmap and
-architecture documents and writes `.harness/roadmap.lock`, marking
-`state.roadmap_frozen = True`. Valid only in a planning phase.
+1. Checks five preconditions, in order: state loads, a phase is
+   active, the phase is not already closed, the phase summary
+   exists, and the working tree has no uncommitted tracked changes.
+2. Optionally freezes the roadmap (`--freeze`, planning only).
+3. Records the summary and the close timestamp in `state.toml`.
+4. Refreshes the harness block in `handoff.md`.
+5. Commits the transition.
+6. Optionally tags the close.
+7. Prints a recommendation to close the chat and start a new phase.
+
+The summary requirement is deliberate: it is the only cross-phase
+context the next session sees, and a phase that ends without one
+leaves the next chat blind.
+
+Timestamps are written with microsecond precision, because
+`is_phase_closed` compares `last_closed` and `last_opened` as
+strings; second-resolution would let a rapid close/new-phase pair
+collide.
 """
 
 from __future__ import annotations
@@ -18,23 +28,56 @@ import sys
 from argparse import Namespace
 from datetime import UTC, datetime
 
-from ...domain.rules import is_planning_phase
+from ...domain.rules import (
+    is_phase_closed,
+    is_planning_phase,
+    is_unset_phase,
+)
 from ...shared.errors import HarnessError
 from .. import lock as lock_mod
 from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
-from ..handoff import update_metadata
+from ..handoff import ensure_metadata
 from ..state import load_state, save_state, set_roadmap_frozen, with_updates
+
+# Must match `state._TIMESTAMP_TIMESPEC`; see that module for the
+# rationale.
+_TIMESTAMP_TIMESPEC = "microseconds"
 
 
 def cmd_close(args: Namespace, deps: Deps) -> int:
-    """Close the session. Returns 0 on success, 2 on error."""
+    """Close the current phase. Returns 0 on success, 2 on error."""
     try:
         config = load_config(deps.fs, deps.project_root)
         state = load_state(deps.fs, deps.project_root)
     except HarnessError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if is_unset_phase(state):
+        print(
+            "error: no active phase to close. Run "
+            "`dwch new-phase NAME --kind {planning|development}` first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if is_phase_closed(state):
+        print(
+            f"error: phase {state.current_phase} is already closed.",
+            file=sys.stderr,
+        )
+        return 2
+
+    summary_rel = f".harness/summaries/{state.current_phase}.md"
+    summary_path = deps.project_root / summary_rel
+    if not deps.fs.exists(summary_path):
+        print(
+            f"error: no summary at {summary_rel}. "
+            "Write one with `dwch apply summary` first.",
+            file=sys.stderr,
+        )
         return 2
 
     if not deps.git.is_clean_tracked(deps.project_root):
@@ -46,22 +89,27 @@ def cmd_close(args: Namespace, deps: Deps) -> int:
         return 2
 
     head = deps.git.try_head(deps.project_root)
-    now = datetime.now(UTC).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec=_TIMESTAMP_TIMESPEC)
 
     if args.freeze:
         rc = _freeze(deps, config, state, head, now)
         if rc != 0:
             return rc
 
+    # Reload: `_freeze` writes state itself. The reload keeps the
+    # summary record consistent with any freeze-side changes
+    # (roadmap_frozen, roadmap_step).
     state = load_state(deps.fs, deps.project_root)
     updated = with_updates(
         state,
         last_commit=head,
         last_commit_date=now,
         last_closed=now,
+        summary_phase=state.current_phase,
+        summary_written_at=now,
     )
     save_state(deps.fs, deps.project_root, updated)
-    update_metadata(deps.fs, deps.project_root, updated)
+    ensure_metadata(deps.fs, deps.project_root, updated)
 
     # Commit the close transition. Without this, the tree is left
     # dirty and the next command that requires a clean tree would
@@ -83,7 +131,13 @@ def cmd_close(args: Namespace, deps: Deps) -> int:
             print(f"warning: could not create tag: {exc}", file=sys.stderr)
 
     print(f"closed. phase={updated.current_phase} step={updated.current_step}")
-    print("next: continue phase, or `dwch new-phase NAME --kind ...`")
+    print()
+    print("next:")
+    print("  1. Close this chat.")
+    print("  2. Start a new phase:")
+    print("     dwch new-phase NAME --kind {planning|development}")
+    print("  3. dwch bootstrap --clipboard")
+    print("  4. Open a fresh chat, paste the bootstrap.")
     return 0
 
 

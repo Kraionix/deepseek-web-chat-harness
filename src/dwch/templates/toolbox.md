@@ -7,6 +7,7 @@ The user has these commands available. Ask for the ones you need.
 | `dwch health` | Check the environment and roadmap state. |
 | `dwch bootstrap --clipboard` | Rebuild the opening message. |
 | `dwch apply NN` | Write the files of step NN. |
+| `dwch apply summary` | Write the phase summary at the end of a phase. |
 | `dwch verify NN` | Run checks, commit, produce the report. |
 | `dwch read PATH --clipboard` | Send a file into the chat. |
 | `dwch map --clipboard` | Send the module interface map. |

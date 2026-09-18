@@ -277,6 +277,12 @@ class State:
     transition (`close`, `new-phase`, `rollback`). It is not kept in
     sync with HEAD after every `verify` — the bootstrap header reads
     HEAD directly from git for that.
+
+    `summary_phase` and `summary_written_at` record the most recent
+    phase summary recorded by `close`. The bootstrap shows
+    `.harness/summaries/{summary_phase}.md` as the only cross-phase
+    context the next session sees. Both default to empty strings:
+    a project has no summary until its first `close`.
     """
 
     harness_version: str
@@ -291,6 +297,8 @@ class State:
     rollback_count: int
     last_opened: str
     last_closed: str
+    summary_phase: str = ""
+    summary_written_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)

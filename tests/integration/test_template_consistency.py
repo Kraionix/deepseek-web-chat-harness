@@ -17,7 +17,7 @@ def test_render_state_parses() -> None:
 
 
 def test_render_state_has_expected_sections() -> None:
-    """The rendered state has every documented section."""
+    """The rendered state has every documented section, including summary."""
     data = tomllib.loads(_render_state(initial_state()))
     for section in (
         "harness",
@@ -26,17 +26,26 @@ def test_render_state_has_expected_sections() -> None:
         "roadmap",
         "rollback",
         "session",
+        "summary",
     ):
         assert section in data
+
+
+def test_render_state_summary_is_empty_on_init() -> None:
+    """A fresh state renders an empty `[summary]` section."""
+    data = tomllib.loads(_render_state(initial_state()))
+    assert data["summary"]["phase"] == ""
+    assert data["summary"]["written_at"] == ""
 
 
 def test_config_to_toml_parses() -> None:
     """`config_to_toml` output parses as TOML with the expected shape."""
     data = tomllib.loads(config_to_toml("demo"))
-    assert data["harness"]["version"] == "0.2.0"
+    assert data["harness"]["version"] == "0.3.0"
     assert data["project"]["name"] == "demo"
     assert data["paths"]["steps"] == "steps"
     assert data["roadmap"]["path"] == ".harness/roadmap.toml"
+    assert data["bootstrap"]["reports_current_phase"] == 1
 
 
 def test_state_written_by_save_matches_render(tmp_path) -> None:

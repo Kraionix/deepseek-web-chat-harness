@@ -16,6 +16,11 @@ def _args(step: str = "01", from_file: str | None = None) -> Namespace:
     return Namespace(step=step, from_file=from_file)
 
 
+def _summary_args(from_file: str | None = None) -> Namespace:
+    """`apply summary` uses the same namespace with `step='summary'`."""
+    return Namespace(step="summary", from_file=from_file)
+
+
 def _phase(root: Path, deps, name: str = "p1", kind: str = "planning") -> None:
     """Start a phase so that apply has somewhere to write."""
     assert cmd_new_phase(Namespace(name=name, kind=kind), deps) == 0
@@ -89,3 +94,49 @@ def test_apply_rollback_on_write_failure(harness_root: Path, deps) -> None:
     )
     assert cmd_apply(_args("01"), deps) == 2
     assert not (harness_root / "src" / "a.py").exists()
+
+
+def test_apply_summary_ok(harness_root: Path, deps) -> None:
+    """A single block for the current phase's summary is written."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = (
+        "<<<FILE:.harness/summaries/p1.md>>>\nphase one done\n<<<END>>>\n"
+    )
+    assert cmd_apply(_summary_args(), deps) == 0
+    body = (harness_root / ".harness" / "summaries" / "p1.md").read_text(
+        encoding="utf-8"
+    )
+    assert body == "phase one done\n"
+
+
+def test_apply_summary_wrong_path(harness_root: Path, deps) -> None:
+    """A block targeting a different phase's summary is refused."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = "<<<FILE:.harness/summaries/other.md>>>\nbody\n<<<END>>>\n"
+    assert cmd_apply(_summary_args(), deps) == 1
+
+
+def test_apply_summary_multiple_blocks(harness_root: Path, deps) -> None:
+    """More than one block is refused."""
+    _phase(harness_root, deps)
+    deps.clipboard.text = (
+        "<<<FILE:.harness/summaries/p1.md>>>\nbody\n<<<END>>>\n"
+        "<<<FILE:other.txt>>>\nx\n<<<END>>>\n"
+    )
+    assert cmd_apply(_summary_args(), deps) == 1
+
+
+def test_apply_summary_no_phase(harness_root: Path, deps) -> None:
+    """Without an active phase, `apply summary` refuses."""
+    deps.clipboard.text = "<<<FILE:.harness/summaries/x.md>>>\nbody\n<<<END>>>\n"
+    assert cmd_apply(_summary_args(), deps) == 2
+
+
+def test_apply_summary_saves_raw(harness_root: Path, deps) -> None:
+    """The raw summary message is saved to `steps/{phase}/summary.txt`."""
+    _phase(harness_root, deps)
+    text = "<<<FILE:.harness/summaries/p1.md>>>\nbody\n<<<END>>>\n"
+    deps.clipboard.text = text
+    assert cmd_apply(_summary_args(), deps) == 0
+    raw = (harness_root / "steps" / "p1" / "summary.txt").read_text(encoding="utf-8")
+    assert raw == text

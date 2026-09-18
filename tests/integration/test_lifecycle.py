@@ -1,4 +1,8 @@
-"""End-to-end lifecycle tests across every command."""
+"""End-to-end lifecycle tests across every command.
+
+Updated for 0.3.0: `close` now requires a phase summary on disk.
+Every close in this file is preceded by `dwch apply summary`.
+"""
 
 from __future__ import annotations
 
@@ -37,6 +41,14 @@ depends_on = []
 _GREET = "def greet(name):\n    return name\n"
 
 
+def _apply_summary(deps, phase: str, body: str = "phase done") -> None:
+    """Write a phase summary via `apply summary`."""
+    deps.clipboard.text = (
+        f"<<<FILE:.harness/summaries/{phase}.md>>>\n{body}\n<<<END>>>\n"
+    )
+    assert cmd_apply(Namespace(step="summary", from_file=None), deps) == 0
+
+
 def test_planning_then_development(harness_root: Path, deps, capsys) -> None:
     """A full planning-to-development cycle runs clean."""
     # Planning: write and verify the roadmap.
@@ -51,6 +63,9 @@ def test_planning_then_development(harness_root: Path, deps, capsys) -> None:
     arch = harness_root / "docs" / "architecture.md"
     arch.parent.mkdir(parents=True, exist_ok=True)
     arch.write_text("Architecture\n", encoding="utf-8")
+
+    # 0.3.0: close requires a summary.
+    _apply_summary(deps, "plan", "Planning phase complete.")
 
     # Freeze the roadmap and start development.
     assert cmd_close(Namespace(tag=False, freeze=True), deps) == 0
@@ -84,6 +99,10 @@ def test_bootstrap_after_roadmap_complete(harness_root: Path, deps, capsys) -> N
     arch = harness_root / "docs" / "architecture.md"
     arch.parent.mkdir(parents=True, exist_ok=True)
     arch.write_text("Architecture\n", encoding="utf-8")
+
+    # 0.3.0: close requires a summary.
+    _apply_summary(deps, "plan", "Planning done.")
+
     cmd_close(Namespace(tag=False, freeze=True), deps)
     cmd_new_phase(Namespace(name="dev", kind="development"), deps)
     deps.clipboard.text = "<<<FILE:src/app.py>>>\n" + _GREET + "<<<END>>>\n"

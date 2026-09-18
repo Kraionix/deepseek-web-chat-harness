@@ -13,11 +13,25 @@ Refuses to start a development phase when the roadmap is exhausted
 (`roadmap_step >= len(steps)`). At that point the correct action is
 a new planning phase that produces a new roadmap version.
 
+Two lifecycle guards run before any write:
+
+1. The previous phase must be closed. A phase is closed when
+   `state.last_closed` is set and is not older than
+   `state.last_opened`.
+2. The phase name must not already exist under `steps/`. Names are
+   not reusable: a directory of artifacts is left behind even after
+   the phase ends, and reusing a name would mix them.
+
 The transition commits the whole tree via `commit_all`, so untracked
 files are expected and do not count as dirt. Only modifications to
 already-tracked files block the command. This lets the very first
 phase be started right after `dwch init`, when `.harness/` and
 `steps/` are still untracked.
+
+Timestamps are written with microsecond precision, because
+`is_phase_closed` compares `last_closed` and `last_opened` as
+strings; second-resolution would let a rapid close/new-phase pair
+collide.
 """
 
 from __future__ import annotations
@@ -27,13 +41,17 @@ from argparse import Namespace
 from datetime import UTC, datetime
 from importlib.resources import files
 
-from ...domain.rules import is_roadmap_frozen
+from ...domain.rules import is_phase_closed, is_roadmap_frozen
 from ...shared.errors import HarnessError
 from .. import roadmap as roadmap_mod
 from ..config import load_config
 from ..deps import Deps
-from ..handoff import update_metadata
+from ..handoff import ensure_metadata
 from ..state import load_state, save_state, with_updates
+
+# Must match `state._TIMESTAMP_TIMESPEC`; see that module for the
+# rationale.
+_TIMESTAMP_TIMESPEC = "microseconds"
 
 # Characters that are unsafe in a directory name on any of the
 # supported platforms: Windows reserves them, POSIX would accept
@@ -45,8 +63,34 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
     """Start a new phase. Returns 0 on success, 2 on error."""
     try:
         config = load_config(deps.fs, deps.project_root)
+        state = load_state(deps.fs, deps.project_root)
     except HarnessError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Guard 1: the previous phase must be closed.
+    if state.current_phase != "unset" and not is_phase_closed(state):
+        print(
+            f"error: phase {state.current_phase} is not closed. "
+            "Run `dwch close` first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    name = args.name
+    steps_root = deps.project_root / config.paths.get("steps", "steps")
+
+    # Guard 2: phase names are unique on disk.
+    if deps.fs.exists(steps_root / name):
+        print(
+            f"error: phase {name} already exists; choose a different name.",
+            file=sys.stderr,
+        )
+        return 2
+
+    err = _validate_phase_name(name)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
         return 2
 
     if not deps.git.is_clean_tracked(deps.project_root):
@@ -57,14 +101,7 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
         )
         return 2
 
-    name = args.name
-    err = _validate_phase_name(name)
-    if err is not None:
-        print(f"error: {err}", file=sys.stderr)
-        return 2
-
     kind = args.kind
-    state = load_state(deps.fs, deps.project_root)
 
     if kind == "planning" and is_roadmap_frozen(state):
         print(
@@ -89,7 +126,7 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
             file=sys.stderr,
         )
 
-    now = datetime.now(UTC).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec=_TIMESTAMP_TIMESPEC)
     head = deps.git.try_head(deps.project_root)
 
     _reset_handoff(deps, name, kind)
@@ -104,7 +141,7 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
         last_opened=now,
     )
     save_state(deps.fs, deps.project_root, updated)
-    update_metadata(deps.fs, deps.project_root, updated)
+    ensure_metadata(deps.fs, deps.project_root, updated)
 
     try:
         commit = deps.git.commit_all(
@@ -119,7 +156,7 @@ def cmd_new_phase(args: Namespace, deps: Deps) -> int:
         print(f"commit: {commit}")
     if kind == "development" and start_step > 0:
         print(f"resuming at roadmap step {start_step + 1}")
-    print("next: `dwch bootstrap --clipboard`")
+    print("next: open a fresh chat and paste `dwch bootstrap --clipboard`")
     return 0
 
 
@@ -184,7 +221,12 @@ def _validate_phase_name(name: str) -> str | None:
 
 
 def _reset_handoff(deps: Deps, name: str, kind: str) -> None:
-    """Write `.harness/handoff.md` from the phase-kind template."""
+    """Write `.harness/handoff.md` from the phase-kind template.
+
+    The template carries a `<!-- harness:begin -->` block with
+    placeholder values; `ensure_metadata` rewrites it in place
+    after `save_state` runs.
+    """
     template_name = (
         "planning-handoff.md" if kind == "planning" else "development-handoff.md"
     )

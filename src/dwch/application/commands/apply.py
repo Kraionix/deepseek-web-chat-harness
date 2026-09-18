@@ -1,12 +1,23 @@
-"""`dwch apply NN` — parse a step message and write its files.
+"""`dwch apply` — write the files of a step, or the phase summary.
 
-The message is read from the clipboard, or from `--from-file`.
-Before any file is written, the entire message is parsed and every
-path is validated. On any error, nothing is written.
+Two forms share one command:
 
-The raw message is saved to `steps/{phase}/step-NN.txt` for the
-record, even when parsing fails. This makes a failed apply
+- `dwch apply NN` — parse a step message and write its files.
+- `dwch apply summary` — write the current phase's summary.
+
+In both forms the message is read from the clipboard, or from
+`--from-file`. Before any file is written, the entire message is
+parsed and every path is validated. On any error, nothing is
+written.
+
+A step's raw message is saved to `steps/{phase}/step-NN.txt` for
+the record, even when parsing fails. This makes a failed apply
 diagnosable without asking the AI to re-send.
+
+A summary's raw message is saved to `steps/{phase}/summary.txt`,
+and the single file block is written to
+`.harness/summaries/{phase}.md`. The summary does not modify state;
+`dwch close` records it later.
 """
 
 from __future__ import annotations
@@ -25,16 +36,28 @@ from ..format import (
     parse_step_message,
     validate_paths,
 )
+from ..handoff import ensure_metadata
 from ..state import load_state
 
 
 def cmd_apply(args: Namespace, deps: Deps) -> int:
-    """Apply a step. Returns 0 on success, 1 on parse error, 2 on I/O."""
+    """Dispatch to the step form or the summary form.
+
+    Returns 0 on success, 1 on parse error, 2 on I/O or precondition
+    failure.
+    """
+    if args.step == "summary":
+        return _apply_summary(args, deps)
+    return _apply_step(args, deps)
+
+
+def _apply_step(args: Namespace, deps: Deps) -> int:
+    """Apply a numbered step. Returns 0, 1, or 2."""
     try:
         int(args.step)
     except (TypeError, ValueError):
         print(
-            f"error: step must be an integer, got {args.step!r}",
+            f"error: step must be an integer or 'summary', got {args.step!r}",
             file=sys.stderr,
         )
         return 2
@@ -96,6 +119,11 @@ def cmd_apply(args: Namespace, deps: Deps) -> int:
         print("partial writes were rolled back via git", file=sys.stderr)
         return 2
 
+    # Invariant: after a step, the harness block in handoff.md is
+    # present and current, even if the AI rewrote the surrounding
+    # prose without it.
+    ensure_metadata(deps.fs, deps.project_root, state)
+
     log_lines = [
         f"step:  {args.step}",
         f"phase: {state.current_phase}",
@@ -111,12 +139,87 @@ def cmd_apply(args: Namespace, deps: Deps) -> int:
     return 0
 
 
-def _read_message(args: Namespace, deps: Deps) -> str | None:
-    """Return the step text, or None after printing an error.
+def _apply_summary(args: Namespace, deps: Deps) -> int:
+    """Write the current phase's summary. Returns 0, 1, or 2.
+
+    Pre:  an active phase exists; the clipboard or `--from-file`
+          holds exactly one file block whose normalized path equals
+          `.harness/summaries/{phase}.md`.
+    Post: the summary file and the raw message are on disk. State is
+          unchanged; `dwch close` records the summary afterwards.
+    Raises: never. Errors are printed and converted into an exit
+          code.
+    """
+    try:
+        config = load_config(deps.fs, deps.project_root)
+        state = load_state(deps.fs, deps.project_root)
+    except HarnessError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if is_unset_phase(state):
+        print(
+            "error: no active phase; run "
+            "`dwch new-phase NAME --kind {planning|development}` first",
+            file=sys.stderr,
+        )
+        return 2
+
+    steps_root = deps.project_root / config.paths.get("steps", "steps")
+    steps_dir = steps_root / state.current_phase
+
+    summary_text = _read_message(args, deps, label="summary")
+    if summary_text is None:
+        return 2
+    if not summary_text.strip():
+        print("error: empty summary message", file=sys.stderr)
+        return 1
+
+    try:
+        specs = parse_step_message(summary_text)
+        validate_paths(specs, deps.project_root)
+    except FormatError as exc:
+        print(f"parse error: {exc}", file=sys.stderr)
+        return 1
+
+    expected = f".harness/summaries/{state.current_phase}.md"
+    if len(specs) != 1:
+        print(
+            f"error: summary message must contain exactly one file block "
+            f"for {expected}, got {len(specs)}",
+            file=sys.stderr,
+        )
+        return 1
+    actual = specs[0].path.replace("\\", "/")
+    if actual != expected:
+        print(
+            f"error: summary block path must be {expected}, got {actual}",
+            file=sys.stderr,
+        )
+        return 1
+
+    deps.fs.mkdir(steps_dir, parents=True)
+    _ensure_steps_gitignore(deps, steps_root)
+    deps.fs.write_text(steps_dir / "summary.txt", summary_text)
+
+    summary_path = deps.project_root / expected
+    deps.fs.mkdir(summary_path.parent, parents=True)
+    deps.fs.write_text(summary_path, specs[0].content)
+
+    print(f"wrote: {expected}")
+    print("next: dwch close")
+    return 0
+
+
+def _read_message(args: Namespace, deps: Deps, label: str = "step") -> str | None:
+    """Return the message text, or None after printing an error.
 
     `--from-file` resolves its argument relative to the project
-    root, not the process working directory. The step message is
-    project data; it belongs with the project, not with the shell.
+    root, not the process working directory. The message is project
+    data; it belongs with the project, not with the shell.
+
+    `label` names the message kind in error text ("step" or
+    "summary").
     """
     if args.from_file is not None:
         path = Path(args.from_file)
@@ -133,7 +236,7 @@ def _read_message(args: Namespace, deps: Deps) -> str | None:
     text = deps.clipboard.read()
     if not text.strip():
         print(
-            "error: clipboard is empty; copy the step message first, "
+            f"error: clipboard is empty; copy the {label} message first, "
             "or use --from-file",
             file=sys.stderr,
         )

@@ -48,6 +48,20 @@ def test_load_bad_toml(tmp_path: Path) -> None:
         load_state(LocalFilesystem(), root)
 
 
+def test_load_rejects_old_version(tmp_path: Path) -> None:
+    """A state file written by an older harness is rejected."""
+    root = _harness(tmp_path)
+    fs = LocalFilesystem()
+    save_state(fs, root, initial_state())
+    path = root / ".harness" / "state.toml"
+    body = path.read_text(encoding="utf-8").replace(
+        'version = "0.3.0"', 'version = "0.2.0"'
+    )
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(StateError, match="does not match"):
+        load_state(fs, root)
+
+
 def test_save_is_atomic(tmp_path: Path) -> None:
     """A failing rename leaves the original state file unchanged."""
     root = _harness(tmp_path)
@@ -94,3 +108,27 @@ def test_initial_state_shape() -> None:
     assert state.phase_kind == "unset"
     assert state.current_step == 0
     assert state.roadmap_frozen is False
+    assert state.summary_phase == ""
+    assert state.summary_written_at == ""
+
+
+def test_round_trip_includes_summary(tmp_path: Path) -> None:
+    """The summary fields survive a save/load round trip."""
+    root = _harness(tmp_path)
+    fs = LocalFilesystem()
+    state = with_updates(
+        initial_state(),
+        summary_phase="p1",
+        summary_written_at="2026-09-18T12:00:00+00:00",
+    )
+    save_state(fs, root, state)
+    loaded = load_state(fs, root)
+    assert loaded.summary_phase == "p1"
+    assert loaded.summary_written_at == "2026-09-18T12:00:00+00:00"
+
+
+def test_initial_state_summary_is_empty() -> None:
+    """A fresh state has empty strings for both summary fields."""
+    state = initial_state()
+    assert state.summary_phase == ""
+    assert state.summary_written_at == ""

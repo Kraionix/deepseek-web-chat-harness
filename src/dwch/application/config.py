@@ -39,7 +39,7 @@ _DEFAULT_ROADMAP = {
 
 _DEFAULT_BOOTSTRAP = {
     "max_tokens": 10000,
-    "recent_reports": 1,
+    "reports_current_phase": 1,
     "recent_deviations": 10,
     "include_module_map": True,
     "truncate": True,
@@ -54,7 +54,10 @@ _DEFAULT_READ_MAX_TOKENS = 6000
 # Version of the config file format. Independent of the package
 # version: a patch release that does not change the format keeps
 # this value, and existing `.harness/config.toml` files keep working.
-_CONFIG_FORMAT_VERSION = "0.2.0"
+#
+# 0.3.0 replaces `bootstrap.recent_reports` with
+# `bootstrap.reports_current_phase`. Old configs are rejected.
+_CONFIG_FORMAT_VERSION = "0.3.0"
 
 
 def load_config(fs: FilesystemPort, project_root: Path) -> Config:
@@ -176,7 +179,7 @@ planning_commands = []
 
 [bootstrap]
 max_tokens = {_DEFAULT_BOOTSTRAP["max_tokens"]}
-recent_reports = {_DEFAULT_BOOTSTRAP["recent_reports"]}
+reports_current_phase = {_DEFAULT_BOOTSTRAP["reports_current_phase"]}
 recent_deviations = {_DEFAULT_BOOTSTRAP["recent_deviations"]}
 include_module_map = {str(_DEFAULT_BOOTSTRAP["include_module_map"]).lower()}
 truncate = {str(_DEFAULT_BOOTSTRAP["truncate"]).lower()}

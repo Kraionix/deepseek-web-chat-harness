@@ -30,6 +30,7 @@ def cmd_health(_args: Namespace, deps: Deps) -> int:
     checks.append(_check_state(deps))
     checks.append(_check_tokenizer(deps))
     checks.append(_check_roadmap(deps))
+    checks.append(_check_summary(deps))
 
     any_critical_failed = False
     for name, ok, detail, critical in checks:
@@ -189,6 +190,36 @@ def _check_roadmap(deps: Deps) -> tuple[str, bool, str, bool]:
         return ("roadmap", False, detail, False)
     detail = f"v{lock.version} frozen at {lock.commit or '(no commit)'}"
     return ("roadmap", True, detail, False)
+
+
+def _check_summary(deps: Deps) -> tuple[str, bool, str, bool]:
+    """Report the phase summary recorded in state, if any.
+
+    The check is informational and never fails health: a project
+    with no summary yet is a normal state, and a missing summary
+    file is a strong signal for the next `close` but not for the
+    current command. Its `critical` flag is always False.
+    """
+    try:
+        state = load_state(deps.fs, deps.project_root)
+    except HarnessError:
+        return ("summary", False, "state not readable", False)
+    if not state.summary_phase:
+        return ("summary", True, "none yet", False)
+    path = deps.project_root / ".harness" / "summaries" / f"{state.summary_phase}.md"
+    if not deps.fs.exists(path):
+        return (
+            "summary",
+            False,
+            f"state says {state.summary_phase}, file missing",
+            False,
+        )
+    return (
+        "summary",
+        True,
+        f"{state.summary_phase} ({state.summary_written_at})",
+        False,
+    )
 
 
 __all__ = ["cmd_health"]

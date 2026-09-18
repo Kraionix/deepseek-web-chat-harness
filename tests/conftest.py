@@ -28,9 +28,12 @@ from tests.fakes import InMemoryClipboard, InMemoryCounter, InMemoryProcess
 # Minimal config that `load_config` accepts. `verify.commands` and
 # `verify.planning_commands` are empty so tests never shell out to
 # ruff; a test that wants a command registers it in `InMemoryProcess`.
+#
+# The 0.3.0 format replaces `bootstrap.recent_reports` with
+# `bootstrap.reports_current_phase`.
 MINIMAL_CONFIG = """\
 [harness]
-version = "0.2.0"
+version = "0.3.0"
 
 [project]
 name = "test-project"
@@ -57,7 +60,7 @@ planning_commands = []
 
 [bootstrap]
 max_tokens = 10000
-recent_reports = 1
+reports_current_phase = 1
 recent_deviations = 10
 include_module_map = false
 truncate = true

@@ -1,5 +1,9 @@
 # Handoff — phase {{phase}}
 
+<!-- The block between harness:begin and harness:end is owned by the
+     harness. Do not edit it; it is rewritten on every close and
+     new-phase. Everything outside the block is yours. -->
+
 <!-- harness:begin -->
 phase: unset
 kind: development
@@ -30,7 +34,3 @@ Describe the phase goal here. What does "done" look like?
   `type = "assumption"`.
 - If a prior step's code has a bug, fix it and write a deviation
   with `type = "bugfix-prior"`.
-
-## Next
-
-The first roadmap step of this phase.
